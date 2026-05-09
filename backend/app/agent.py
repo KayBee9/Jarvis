@@ -13,17 +13,27 @@ If the user asks for those future capabilities, explain that they are planned.
 Keep answers concise, useful, and conversational.
 """.strip()
 
+DEV_RESPONSES = {
+    "hello": "Hey! I'm Jarvis. How can I help you today?",
+    "what can you do": "Right now I can respond to certain keywords",
+    "weather": "I don't have weather access yet — that's planned for a future phase.",
+}
 
 async def generate_reply(message: str, previous_response_id: str | None = None) -> tuple[str, str | None]:
     settings = get_settings()
 
     if not settings.openai_api_key:
-        return (
-            "I can chat in local dev mode, but I am not connected to OpenAI yet. "
-            "Set OPENAI_API_KEY in backend/.env and restart the FastAPI server for full responses. "
-            f"You said: {message}",
-            None,
+        reply = next(
+            (response for keyword, response in DEV_RESPONSES.items() if keyword in message.lower()),
+            f"I can chat in local dev mode, but I am not connected to OpenAI yet"
         )
+        return reply, None
+        # return (
+        #     "I can chat in local dev mode, but I am not connected to OpenAI yet. "
+        #     "Set OPENAI_API_KEY in backend/.env and restart the FastAPI server for full responses. "
+        #     f"You said: {message}",
+        #     None,
+        # )
 
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     request = {

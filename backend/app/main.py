@@ -1,3 +1,4 @@
+from typing import AsyncIterator
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -15,27 +16,27 @@ from app.db import (
 )
 from app.models import ChatRequest, ChatResponse, Conversation
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await database.connect()
+    yield
+    await database.close()
+
 
 settings = get_settings()
-app = FastAPI(title="Jarvis API", version="0.1.0")
+app = FastAPI(title="Jarvis API", version="0.1.0", lifespan=lifespan)
 
+#Runs before and after each request from a stack, meaning last in this list runs first before the request
+# and first in this list first after the request (5,4,3,2,1,request, response, 1,2,3,4,5)
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, #1
+    allow_origins=[settings.frontend_origin], #2 
+    allow_credentials=True, #3 
+    allow_methods=["*"], #4 (allow all HTTP methods)
+    allow_headers=["*"], #5 (allow all HTTP headers)
 )
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    await database.connect()
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    await database.close()
 
 
 @app.get("/health")

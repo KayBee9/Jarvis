@@ -24,10 +24,11 @@ Included:
 - Conversation continuation with `previous_response_id`
 - Supabase Postgres tables for conversations and messages
 - Local dev fallback when `OPENAI_API_KEY` or `DATABASE_URL` is not configured
+- Voice (but only with Chrome/Edge only)
 
 Not included yet:
 
-- Voice
+
 - Durable user-approved memories
 - Memory search with pgvector
 - Conversation summarization jobs

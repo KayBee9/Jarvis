@@ -17,7 +17,7 @@ class Database:
         if settings.database_url:
             self.pool = await asyncpg.create_pool(settings.database_url)
 
-    async def close(self) -> None:
+    async def close(self) -> None: 
         if self.pool:
             await self.pool.close()
 

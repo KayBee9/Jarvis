@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useMemo, useRef, useState } from "react";
-import { Loader2, Send, Sparkles } from "lucide-react";
+import { FormEvent, useCallback, useMemo, useRef, useState } from "react";
+import { Loader2, Mic, MicOff, Send, Sparkles } from "lucide-react";
+
+import { useVoice } from "@/hooks/useVoice";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,6 +38,13 @@ export default function Home() {
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+
+  const handleTranscript = useCallback((text: string) => {
+    setInput(text);
+  }, []);
+
+  const { isListening, isSupported, startListening, stopListening, speak } =
+    useVoice(handleTranscript);
 
   const canSend = useMemo(
     () => input.trim().length > 0 && !isSending,
@@ -87,6 +96,7 @@ export default function Home() {
           content: data.assistant_message,
         },
       ]);
+      speak(data.assistant_message);
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -173,16 +183,34 @@ export default function Home() {
           />
           <div className="flex items-center justify-between gap-3">
             <p className="text-xs text-muted-foreground">
-              Text chat only in this phase.
+              {isSupported ? "Ctrl+Enter to send · mic to speak" : "Ctrl+Enter to send"}
             </p>
-            <Button disabled={!canSend} type="submit">
-              {isSending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Send className="mr-2 h-4 w-4" aria-hidden="true" />
+            <div className="flex items-center gap-2">
+              {isSupported && (
+                <Button
+                  aria-label={isListening ? "Stop listening" : "Start voice input"}
+                  onClick={isListening ? stopListening : startListening}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                  className={isListening ? "text-red-500 animate-pulse" : ""}
+                >
+                  {isListening ? (
+                    <MicOff className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Mic className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </Button>
               )}
-              Send
-            </Button>
+              <Button disabled={!canSend} type="submit">
+                {isSending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Send className="mr-2 h-4 w-4" aria-hidden="true" />
+                )}
+                Send
+              </Button>
+            </div>
           </div>
         </form>
       </section>
