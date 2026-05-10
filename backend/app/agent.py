@@ -1,6 +1,7 @@
 from uuid import UUID
+from xmlrpc import client
 
-from openai import AsyncOpenAI
+import anthropic
 
 from app.config import get_settings
 
@@ -22,10 +23,10 @@ DEV_RESPONSES = {
 async def generate_reply(message: str, previous_response_id: str | None = None) -> tuple[str, str | None]:
     settings = get_settings()
 
-    if not settings.openai_api_key:
+    if not settings.anthropic_api_key:
         reply = next(
             (response for keyword, response in DEV_RESPONSES.items() if keyword in message.lower()),
-            f"I can chat in local dev mode, but I am not connected to OpenAI yet"
+            f"I can chat in local dev mode, but I am not connected to Anthropic yet"
         )
         return reply, None
         # return (
@@ -35,18 +36,14 @@ async def generate_reply(message: str, previous_response_id: str | None = None) 
         #     None,
         # )
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    request = {
-        "model": settings.openai_model,
-        "instructions": SYSTEM_PROMPT,
-        "input": message,
-    }
-    if previous_response_id:
-        request["previous_response_id"] = previous_response_id
-
-    response = await client.responses.create(**request)
-
-    return response.output_text, response.id
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    response = await client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": message}],
+    )
+    return response.content[0].text, response.id
 
 
 def fallback_conversation_id(seed: UUID | None) -> UUID | None:

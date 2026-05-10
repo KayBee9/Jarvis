@@ -21,6 +21,10 @@ type ChatResponse = {
   response_id: string | null;
 };
 
+// TODO: when refreshing the page, and only refreshing the page, reload the messages
+// from that session.
+
+
 const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 

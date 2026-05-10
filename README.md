@@ -9,10 +9,10 @@ Current phase: **Phase 1 - Core Text Agent**
 - Frontend: Next.js, React, Tailwind, shadcn/ui-style local components
 - Backend: FastAPI
 - Database: Supabase Postgres
-- AI: OpenAI Responses API
+- AI: Anthropic Claude API
 - Auth: Supabase Auth planned; Phase 1 uses a dev user locally unless JWT verification is configured
 
-Later phases will add pgvector memory recall, Redis/Celery jobs, OpenAI Realtime voice, reminders, daily briefing, monitoring, and deployment wiring.
+Later phases will add pgvector memory recall, Redis/Celery jobs, higher-quality voice (e.g. Whisper + ElevenLabs), reminders, daily briefing, monitoring, and deployment wiring.
 
 ## Phase 1 Scope
 
@@ -20,11 +20,11 @@ Included:
 
 - Browser chat UI
 - FastAPI `/api/chat` endpoint
-- OpenAI Responses API integration
-- Conversation continuation with `previous_response_id`
+- Anthropic Claude API integration
+- Conversation continuation by replaying full message history from Supabase on each request
 - Supabase Postgres tables for conversations and messages
-- Local dev fallback when `OPENAI_API_KEY` or `DATABASE_URL` is not configured
-- Voice (but only with Chrome/Edge only)
+- Local dev fallback when `ANTHROPIC_API_KEY` or `DATABASE_URL` is not configured
+- Voice input/output via Web Speech API (Chrome/Edge only)
 
 Not included yet:
 
@@ -58,15 +58,15 @@ copy .env.example .env
 Edit `backend/.env`:
 
 ```env
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-5.2
+ANTHROPIC_API_KEY=your_anthropic_api_key
+ANTHROPIC_MODEL=claude-sonnet-4-6
 DATABASE_URL=your_supabase_postgres_connection_string
 SUPABASE_JWT_SECRET=
 DEV_USER_ID=00000000-0000-0000-0000-000000000001
 FRONTEND_ORIGIN=http://localhost:3000
 ```
 
-`OPENAI_API_KEY` is optional for local smoke testing. Without it, the backend returns a dev-mode response.
+`ANTHROPIC_API_KEY` is optional for local smoke testing. Without it, the backend returns a dev-mode response.
 
 `DATABASE_URL` is optional for local smoke testing. Without it, chat still works, but conversation messages are not persisted.
 
@@ -120,7 +120,7 @@ http://localhost:3000
 2. Start the Next.js frontend from `frontend/`.
 3. Open `http://localhost:3000`.
 4. Send a message in the chat box.
-5. If `OPENAI_API_KEY` is configured, Jarvis responds through the OpenAI Responses API.
+5. If `ANTHROPIC_API_KEY` is configured, Jarvis responds through the Anthropic Claude API.
 6. If `DATABASE_URL` is configured and the Supabase migration has been run, messages are persisted to Supabase.
 
 ## API
@@ -142,13 +142,17 @@ Response:
 {
   "conversation_id": "uuid",
   "assistant_message": "Hi there...",
-  "response_id": "resp_..."
+  "response_id": "msg_..."
 }
 ```
 
 ### `GET /api/conversations/{conversation_id}`
 
 Returns a persisted conversation with messages. Requires `DATABASE_URL`.
+
+## Known Gaps / Future Work
+
+- **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request to build the message context for Claude. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
 
 ## Next Phase
 
@@ -157,7 +161,7 @@ Phase 2 should add the memory system:
 - propose memory candidates from chat
 - require user approval before saving memories
 - store approved memories in Supabase
-- embed memories with OpenAI embeddings
+- embed memories with Voyage AI embeddings
 - retrieve relevant memories with pgvector during chat
 - add inspect/delete memory endpoints and UI
 
