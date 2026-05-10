@@ -161,7 +161,7 @@ Phase 2 should add the memory system:
 - propose memory candidates from chat
 - require user approval before saving memories
 - store approved memories in Supabase
-- embed memories with Voyage AI embeddings
+- embed memories with a local model (e.g. `sentence-transformers`) by default, with Voyage AI as a configurable alternative provider behind a shared abstraction
 - retrieve relevant memories with pgvector during chat
 - add inspect/delete memory endpoints and UI
 

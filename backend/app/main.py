@@ -1,10 +1,12 @@
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
+import asyncpg
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import agent
+from app import memories
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.db import (
@@ -12,9 +14,11 @@ from app.db import (
     create_conversation,
     database,
     fetch_conversation,
+    get_db,
     get_previous_response_id,
 )
-from app.models import ChatRequest, ChatResponse, Conversation
+
+from app.models import ChatRequest, ChatResponse, Conversation, MemoryCreateRequest, Memory
 
 from contextlib import asynccontextmanager
 
@@ -40,23 +44,33 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health() -> dict[str, bool]:
-    return {"ok": True, "database_configured": database.is_configured}
+async def health(
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> dict[str, bool]:
+    db_ok = False
+    if conn:
+        try:
+            await conn.fetchval("select 1")
+            db_ok = True
+        except Exception:
+            db_ok = False
+    return {"ok": True, "database_configured": db_ok}
 
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
     user_id: str = Depends(get_current_user_id),
+    conn: asyncpg.Connection | None = Depends(get_db),
 ) -> ChatResponse:
     conversation_id = payload.conversation_id
     previous_response_id = None
 
-    if database.is_configured:
+    if conn:
         if not conversation_id:
-            conversation_id = await create_conversation(user_id)
-        previous_response_id = await get_previous_response_id(conversation_id, user_id)
-        await add_message(conversation_id, user_id, "user", payload.message)
+            conversation_id = await create_conversation(conn, user_id)
+        previous_response_id = await get_previous_response_id(conn, conversation_id, user_id)
+        await add_message(conn, conversation_id, user_id, "user", payload.message)
     else:
         conversation_id = conversation_id or uuid4()
 
@@ -65,8 +79,9 @@ async def chat(
         previous_response_id=previous_response_id,
     )
 
-    if database.is_configured:
+    if conn:
         await add_message(
+            conn,
             conversation_id,
             user_id,
             "assistant",
@@ -85,12 +100,50 @@ async def chat(
 async def get_conversation(
     conversation_id: UUID,
     user_id: str = Depends(get_current_user_id),
+    conn: asyncpg.Connection | None = Depends(get_db),
 ) -> Conversation:
-    if not database.is_configured:
+    if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
 
-    conversation = await fetch_conversation(conversation_id, user_id)
+    conversation = await fetch_conversation(conn, conversation_id, user_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     return conversation
+
+@app.post("/api/memories")
+async def create_memory(
+    payload: MemoryCreateRequest,
+    user_id: str = Depends(get_current_user_id),
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> dict[str, str]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
+    memory_id = await memories.create_memory_db(conn, user_id, payload.content)
+    return {"memory_id": str(memory_id)}
+
+@app.get("/api/memories", response_model=list[Memory])
+async def list_memories(
+    user_id: str = Depends(get_current_user_id),
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> list[dict]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
+    return await memories.list_memories_db(conn, user_id)
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(
+    memory_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> dict[str, str]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
+    success = await memories.delete_memory_db(conn, user_id, memory_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Memory not found")
+
+    return {"detail": "Memory deleted successfully"}

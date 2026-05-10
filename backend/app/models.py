@@ -30,3 +30,11 @@ class Conversation(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[Message]
+
+class MemoryCreateRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+
+class Memory(BaseModel):
+    id: UUID
+    content: str
+    created_at: datetime
