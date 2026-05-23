@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from uuid import UUID
 
 import asyncpg
+import pgvector.asyncpg
 
 from app.config import get_settings
 from app.models import Conversation, Message
@@ -16,6 +17,10 @@ class Database:
         settings = get_settings()
         if settings.database_url:
             self.pool = await asyncpg.create_pool(settings.database_url)
+            self.pool = await asyncpg.create_pool(
+                settings.database_url,
+                init=pgvector.asyncpg.register_vector,
+            )
 
     async def close(self) -> None: 
         if self.pool:

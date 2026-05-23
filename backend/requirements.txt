@@ -5,3 +5,5 @@ asyncpg==0.30.0
 python-dotenv==1.0.1
 PyJWT==2.10.1
 pydantic-settings==2.7.1
+sentence-transformers
+pgvector==0.4.2

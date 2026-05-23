@@ -20,7 +20,8 @@ DEV_RESPONSES = {
     "weather": "I don't have weather access yet — that's planned for a future phase.",
 }
 
-async def generate_reply(message: str, previous_response_id: str | None = None) -> tuple[str, str | None]:
+async def generate_reply(message: str, previous_response_id: str | None = None,
+                        relevant_memories: list[str] | None = None) -> tuple[str, str | None]:
     settings = get_settings()
 
     if not settings.anthropic_api_key:
@@ -35,6 +36,11 @@ async def generate_reply(message: str, previous_response_id: str | None = None) 
         #     f"You said: {message}",
         #     None,
         # )
+
+    system_prompt = SYSTEM_PROMPT
+    if relevant_memories:
+        memories = "\n".join(f"- {memory}" for memory in relevant_memories)
+        system_prompt += f"\n\nHere are some relevant memories to consider:\n{memories}" #Maybe need to change this for better results
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     response = await client.messages.create(

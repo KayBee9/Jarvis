@@ -153,6 +153,8 @@ Returns a persisted conversation with messages. Requires `DATABASE_URL`.
 ## Known Gaps / Future Work
 
 - **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request to build the message context for Claude. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
+- **Voyage AI embedding provider** — embeddings currently run locally via `sentence-transformers` (`all-MiniLM-L6-v2`). The `EmbeddingProvider` abstraction in `app/embeddings.py` is designed to be swappable; adding a `VoyageProvider` behind the same interface would let `EMBEDDING_PROVIDER=voyage` in `.env` switch to Voyage's hosted API for better embedding quality (at the cost of an API key and per-request network latency).
+- **Auto-extraction of memories with approval** — memory saving is currently fully manual: the user clicks "Save to memory" on a message and edits the text before storing. A future improvement is to run a second Claude call after each chat turn asking what durable facts the user shared, then surface those candidates in the UI with Save/Skip buttons. Approved candidates flow through the existing embed-and-store pipeline. Done well, this makes Jarvis feel proactive rather than a passive notepad — but requires careful prompt engineering to avoid junk suggestions.
 
 ## Next Phase
 

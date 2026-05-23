@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import agent
 from app import memories
+from app import embeddings
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.db import (
@@ -25,6 +26,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
+    embeddings.init_provider() #loads the embedding model at startup
     yield
     await database.close()
 
@@ -71,12 +73,16 @@ async def chat(
             conversation_id = await create_conversation(conn, user_id)
         previous_response_id = await get_previous_response_id(conn, conversation_id, user_id)
         await add_message(conn, conversation_id, user_id, "user", payload.message)
+        query_embedding = await embeddings.get_provider().embed(payload.message)
+        memory_rows = await memories.search_memories(conn, user_id, query_embedding)
+        relevant_memories = [memory["content"] for memory in relevant_memories]
     else:
         conversation_id = conversation_id or uuid4()
 
     assistant_message, response_id = await agent.generate_reply(
         payload.message,
         previous_response_id=previous_response_id,
+        relevant_memories=relevant_memories
     )
 
     if conn:
@@ -119,8 +125,9 @@ async def create_memory(
 ) -> dict[str, str]:
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
-
-    memory_id = await memories.create_memory_db(conn, user_id, payload.content)
+    
+    embedding = await embeddings.get_provider().embed(payload.content)
+    memory_id = await memories.create_memory_db(conn, user_id, payload.content, embedding)
     return {"memory_id": str(memory_id)}
 
 @app.get("/api/memories", response_model=list[Memory])

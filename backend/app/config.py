@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str | None = None
     dev_user_id: str = "00000000-0000-0000-0000-000000000001"
     frontend_origin: str = "http://localhost:3000"
+    embedding_provider: str = "local"
+    embedding_model: str = "all-MiniLM-L6-v2"
+
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
