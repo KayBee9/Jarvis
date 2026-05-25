@@ -1,27 +1,49 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 :root {
-  --background: 42 18% 96%;
-  --foreground: 210 18% 13%;
-  --muted: 42 12% 90%;
-  --muted-foreground: 218 10% 42%;
-  --border: 210 16% 82%;
-  --input: 210 16% 82%;
-  --primary: 168 72% 26%;
-  --primary-foreground: 0 0% 100%;
-  --accent: 205 42% 88%;
-  --accent-foreground: 210 18% 13%;
+  --background: #0a0a0a;
+  --foreground: #fafafa;
+  --muted: #71717a;
+  --border: #27272a;
 }
 
-* {
-  box-sizing: border-box;
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
+
 
 body {
-  min-height: 100vh;
-  margin: 0;
-  background: hsl(var(--background));
-  color: hsl(var(--foreground));
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Helvetica, sans-serif;
+}
+
+.jarvis-orb {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+    circle at center,
+    rgba(246, 149, 59, 0.18) 0%,
+    rgba(246, 149, 59, 0.08) 35%,
+    transparent 70%
+  );
+  animation: jarvi-pulse 6s ease-in-out infinite;
+}
+
+@keyframes jarvi-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
 }

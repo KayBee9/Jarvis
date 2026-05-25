@@ -67,6 +67,7 @@ async def chat(
 ) -> ChatResponse:
     conversation_id = payload.conversation_id
     previous_response_id = None
+    relevant_memories: list[str] = []
 
     if conn:
         if not conversation_id:
@@ -75,7 +76,7 @@ async def chat(
         await add_message(conn, conversation_id, user_id, "user", payload.message)
         query_embedding = await embeddings.get_provider().embed(payload.message)
         memory_rows = await memories.search_memories(conn, user_id, query_embedding)
-        relevant_memories = [memory["content"] for memory in relevant_memories]
+        relevant_memories = [memory["content"] for memory in memory_rows]
     else:
         conversation_id = conversation_id or uuid4()
 
