@@ -16,6 +16,7 @@ Keep answers concise, useful, and conversational.
 
 DEV_RESPONSES = {
     "hello": "Hey! I'm Jarvis. How can I help you today?",
+    "i am enzo": "Fuck you Enzo",
     "what can you do": "Right now I can respond to certain keywords",
     "weather": "I don't have weather access yet — that's planned for a future phase.",
 }

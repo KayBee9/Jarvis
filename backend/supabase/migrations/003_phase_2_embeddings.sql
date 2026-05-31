@@ -1,7 +1,7 @@
 CREATE EXTENSION if not exists vector;
 
 alter table memories
-    add column if not exists embedding vector(3);
+    add column if not exists embedding vector(384);
 
 CREATE INDEX if not exists memories_embedding_idx
     ON memories 
