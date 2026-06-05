@@ -159,6 +159,12 @@ Returns a persisted conversation with messages. Requires `DATABASE_URL`.
 - **Voice-reactive Jarvis orb** — the background orb currently pulses on a fixed timer. When Jarvis speaks (TTS), the orb's pulse should sync to the rhythm/amplitude of the voice output, similar to the Iron Man arc reactor reacting to JARVIS's speech. Likely implementation: tap the Web Audio API's `AnalyserNode` on the TTS audio stream, sample the frequency/amplitude in real time, and drive the orb's `transform: scale()` and `opacity` from those values via CSS custom properties.
 - **Loading state during chat responses** — Claude can take 1-3 seconds to reply. The frontend currently has no visual feedback during that wait: the input stays editable, the button looks the same, and the user sees nothing happen until the response arrives. A future improvement is to disable the input while a request is in flight and show a "Jarvis is thinking..." indicator in the messages area (or pulse the orb faster as a signal).
 - **Batched-thought input (stack of inputs)** — instead of the standard one-message-at-a-time chat, let the user queue up multiple thoughts before sending. UX: each thought is added to a visible stack above the input via a `+` button; the Send button submits the whole stack as one message to Claude formatted as a bulleted list, displayed in the chat as a single combined user bubble. Useful when the user wants to dump several related questions or points and get one cohesive reply addressing all of them. Each stack item needs a stable id and a remove (×) button.
+- **Local voice (STT + TTS)** — voice is not yet wired into the new frontend. The intended stack is fully local and free: `faster-whisper` for speech-to-text and `Piper` or `Kokoro` for text-to-speech. Architecture mirrors the embedding provider — load the model at backend startup via lifespan, expose `POST /api/transcribe` and `POST /api/speak` endpoints, and have the frontend record audio via `MediaRecorder` for input and play back the audio response for output. Reference repos:
+  - faster-whisper (STT): https://github.com/SYSTRAN/faster-whisper
+  - Piper (TTS, maintenance-mode original): https://github.com/rhasspy/piper
+  - Piper (TTS, active fork): https://github.com/OHF-Voice/piper1-gpl
+  - Piper voice samples: https://rhasspy.github.io/piper-samples/
+  - Kokoro (TTS, 82M params, high quality): https://github.com/hexgrad/kokoro
 
 ## Next Phase
 

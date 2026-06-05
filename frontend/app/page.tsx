@@ -45,6 +45,16 @@ export default function Home() {
   // True while a fetch is in flight
   const [isLoadingMemories, setIsLoadingMemories] = useState(false);
 
+  // Whether the Memorie itself is open or not, in order to delete it
+  const [openMemoryId, setOpenMemoryId] = useState<string | null>(null);
+  // Memories currently being deleted (for loading state)
+  const [deletingMemoryIds, setDeletingMemoryIds] = useState<Set<string>>(new Set());
+  // A memory currently in the "deleted but undoable" window
+  const [pendingDelete, setPendingDelete] = useState<{
+    memory: Memory;
+    timeoutId: ReturnType<typeof setTimeout>;
+  } | null>(null);
+
   // Whenever messages change, scroll that bottom element into view.
   useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -127,6 +137,59 @@ export default function Home() {
     } finally {
       setIsLoadingMemories(false);
     }
+  }
+
+  // Function to actually delete the memory on server. Called from a delayed timeout,
+  // or immediately if a new delete arrives before the previous one expires.
+  async function commitDelete(memoryId: string) {
+    setDeletingMemoryIds((current) => new Set(current).add(memoryId));
+    try{
+      const response = await fetch(`${apiBaseUrl}/api/memories/${memoryId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(`Failed to delete Memory ${response.status}`);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setDeletingMemoryIds((current) => {
+        const next = new Set(current);
+        next.delete(memoryId);
+        return next;
+      });
+    }
+  }
+
+  // Removes the memory from the panel and calls commitDelete after 5 seconds
+  function softDeleteMemory(memory: Memory) {
+    // If another delete is pending, commit immediately
+    if (pendingDelete){
+      clearTimeout(pendingDelete.timeoutId);
+      void commitDelete(pendingDelete.memory.id);
+    }
+
+    // Remove from the Panel immediately
+    setMemories((current) => current.filter((m) => m.id !== memory.id));
+    setOpenMemoryId(null);
+
+    // Schedule the real delete in 5s
+    const timeoutId = setTimeout(() => {
+      void commitDelete(memory.id);
+      setPendingDelete(null);
+    }, 5000);
+
+    setPendingDelete({ memory, timeoutId });
+  }
+
+  // Cancels the pending delete and restores the memory to the panel to it's original position
+  function undoDelete() {
+    if (!pendingDelete) return;
+    clearTimeout(pendingDelete.timeoutId);
+    setMemories((current) => 
+      [...current, pendingDelete.memory].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ),
+    );
+    setPendingDelete(null);
   }
 
   //whenever the panel opens, fetch fresh memories.
@@ -237,17 +300,40 @@ export default function Home() {
                 <p className="text-sm text-muted">No memories yet. Save some from the chat!</p>
               ) : (
                 <ul className="space-y-3">
-                  {memories.map((memory) => (
+                  {memories.map((memory) => {
+                    const isOpen = openMemoryId === memory.id;
+                    const isDeleting = deletingMemoryIds.has(memory.id);
+                    return (
                     <li
                       key={memory.id}
-                      className="rounded-xl border border-border p-3 text-sm"
+                      className="relative overflow-hidden rounded-xl border border-border"
                     >
-                      <p className="whitespace-pre-wrap break-words">{memory.content}</p>
-                      <p className="mt-2 text-xs text-muted">
-                        {new Date(memory.created_at).toLocaleDateString()}
-                      </p>
+                      {/* Delete button sits behind, revealed when content slides left */}
+                      <button
+                        type="button"
+                        onClick={() => softDeleteMemory(memory)}
+                        disabled={isDeleting}
+                        className="absolute right-0 top-0 bottom-0 w-20 bg-red-600 text-sm text-white"
+                      >
+                        {isDeleting ? "..." : "Delete"}
+                      </button>
+                      {/* Content - clicking toggles to the side */}
+                      <div
+                        onClick={() =>
+                          setOpenMemoryId((current) => (current === memory.id ? null : memory.id))
+                        }
+                        className={`relative bg-background p-3 text-sm cursor-pointer transition-transform ${
+                          isOpen ? "-translate-x-20" : ""
+                        }`}
+                      >
+                        <p className="whitespace-pre-wrap break-words">{memory.content}</p>
+                        <p className="mt-2 text-xs text-muted">
+                          {new Date(memory.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
                     </li>
-                  ))}
+                  );
+                })}
                 </ul> 
               )}
             </div>
@@ -306,6 +392,20 @@ export default function Home() {
       </div>
 
     )}  
+
+    {pendingDelete && (
+      <div className="fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full border border-border bg-background px-4 py-2 text-sm shadow-lg">
+        <span>Memory deleted</span>
+        <button
+          type="button"
+          onClick={undoDelete}
+          className="font-medium text-foreground hover:underline"
+        >
+          Undo
+        </button>
+      </div>
+    )}
+
   </main>
   );
 }
