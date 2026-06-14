@@ -7,3 +7,6 @@ PyJWT==2.10.1
 pydantic-settings==2.7.1
 sentence-transformers
 pgvector==0.4.2
+piper-tts
+faster-whisper
+python-multipart

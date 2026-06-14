@@ -38,3 +38,6 @@ class Memory(BaseModel):
     id: UUID
     content: str
     created_at: datetime
+
+class SpeakRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=8000)

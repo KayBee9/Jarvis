@@ -55,20 +55,29 @@ export default function Home() {
     timeoutId: ReturnType<typeof setTimeout>;
   } | null>(null);
 
+  // Wether the mic is currently capturing
+  const [isRecording, setIsRecording] = useState(false);
+  // Holds the active MediaRecorder instance so stopRecording() can reach it
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  // Holds audio chunks as they're emitted during recording
+  const audioChunksRef = useRef<Blob[]>([]);
+  // Holds the active timeout for the VAD, so it can be cleared and restarted on every new audio chunk
+  const vadIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Whenever messages change, scroll that bottom element into view.
   useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   // Append the input to the messages list and clear the field.
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!input.trim()) return;
+  async function sendMessage(text : string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content: input,
+      content: trimmed,
     };
     setMessages((current) => [...current, userMessage]);
     setInput("");
@@ -96,9 +105,15 @@ export default function Home() {
         content: data.assistant_message,
       };
       setMessages((current) => [...current, jarvisMessage]);
+      void SpeakText(data.assistant_message);
     } catch (error) {
       console.error(error);
     }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    await sendMessage(input);
   }
   
   // Function to save a memory, 
@@ -192,6 +207,123 @@ export default function Home() {
     setPendingDelete(null);
   }
 
+  // function for Jarvis to speak every response
+  async function SpeakText(text: string) {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/speak`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) throw new Error(`Speak request failed with ${response.status}`);
+      const Blob = await response.blob();
+      const url = URL.createObjectURL(Blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch (error) {
+      console.error(error);
+    }
+  } 
+
+  // Function to start recording audio from the user's microphone
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+
+      // --- VAD setup ---
+      const audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const silenceThreshold = 8;   // RMS amplitude below this = "silence"
+      const silenceDuration = 1200; // ms of silence before auto-stop
+      let lastSpeechTime: number | null = null;
+      let hasDetectedSpeech = false;
+
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        void audioContext.close();
+        if (vadIntervalRef.current) {
+          clearInterval(vadIntervalRef.current);
+          vadIntervalRef.current = null;
+        }
+        setIsRecording(false);
+
+        // Don't send if user clicked stop before speaking
+        if (!hasDetectedSpeech) return;
+
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const formData = new FormData();
+        formData.append("file", blob, "recording.webm");
+
+        try {
+          const response = await fetch(`${apiBaseUrl}/api/transcribe`, {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) throw new Error(`Transcription failed ${response.status}`);
+          const data = (await response.json()) as { text: string };
+          if (data.text.trim()) {
+            await sendMessage(data.text);
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      };
+
+      // --- VAD polling loop ---
+      vadIntervalRef.current = setInterval(() => {
+        analyser.getByteTimeDomainData(dataArray);
+
+        // Compute RMS (root-mean-square) — a proxy for volume
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const value = dataArray[i] - 128; // center waveform around 0
+          sum += value * value;
+        }
+        const rms = Math.sqrt(sum / dataArray.length);
+
+        const now = Date.now();
+        if (rms > silenceThreshold) {
+          hasDetectedSpeech = true;
+          lastSpeechTime = now;
+        } else if (
+          hasDetectedSpeech &&
+          lastSpeechTime !== null &&
+          now - lastSpeechTime > silenceDuration
+        ) {
+          recorder.stop();
+        }
+      }, 50);
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (error) {
+      console.error("Could not access microphone", error);
+    }
+  }
+
+  // Function to stop the active recording
+  function stopRecording() {
+    if (vadIntervalRef.current) {
+    clearInterval(vadIntervalRef.current);
+      vadIntervalRef.current = null;
+    }
+      mediaRecorderRef.current?.stop();
+    }
+
   //whenever the panel opens, fetch fresh memories.
   useEffect(() => {
     if (isPanelOpen) {
@@ -263,6 +395,18 @@ export default function Home() {
               }
             }}
           />
+        <button
+          type="button"
+          onClick={isRecording ? stopRecording : startRecording}
+          className={
+            isRecording
+              ? "rounded-full bg-red-500 px-3 py-1.5 text-sm text-white animate-pulse"
+              : "rounded-full border border-border px-3 py-1.5 text-sm text-foreground"
+          }
+          aria-label={isRecording ? "Stop recording" : "Start recording"}
+        >
+          {isRecording ? "⏹" : "🎤"}
+        </button>
         <button
           className="rounded-full bg-foreground px-4 py-1.5 text-sm text-background"
           type="submit"

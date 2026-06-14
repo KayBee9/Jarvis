@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
     embedding_provider: str = "local"
     embedding_model: str = "all-MiniLM-L6-v2"
+    piper_model_path: str = "models/piper/en_US-amy-medium.onnx"
+    whisper_model: str = "base"
+
 
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")

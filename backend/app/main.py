@@ -2,12 +2,10 @@ from typing import AsyncIterator
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import agent
-from app import memories
-from app import embeddings
+from app import agent, memories, embeddings, voice
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.db import (
@@ -19,7 +17,7 @@ from app.db import (
     get_previous_response_id,
 )
 
-from app.models import ChatRequest, ChatResponse, Conversation, MemoryCreateRequest, Memory
+from app.models import ChatRequest, ChatResponse, Conversation, MemoryCreateRequest, Memory , SpeakRequest
 
 from contextlib import asynccontextmanager
 
@@ -27,6 +25,8 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
     embeddings.init_provider() #loads the embedding model at startup
+    voice.init_tts() #loads the TTS model at startup
+    voice.init_stt() #loads the STT model at startup
     yield
     await database.close()
 
@@ -155,3 +155,17 @@ async def delete_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     return {"detail": "Memory deleted successfully"}
+
+
+@app.post("/api/speak")
+async def speak(payload: SpeakRequest) -> Response:
+    provider = voice.get_tts()
+    audio_bytes = await provider.synthesize(payload.text)
+    return Response(content=audio_bytes, media_type="audio/wav")
+
+@app.post("/api/transcribe")
+async def transcribe(file: UploadFile = File(...)) -> dict[str, str]:
+    audio_bytes = await file.read()
+    provider = voice.get_stt()
+    text = await provider.transcribe(audio_bytes)
+    return {"text": text}

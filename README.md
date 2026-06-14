@@ -150,6 +150,18 @@ Response:
 
 Returns a persisted conversation with messages. Requires `DATABASE_URL`.
 
+## Voice Tuning
+
+The frontend mic uses browser-side Voice Activity Detection (VAD) to auto-stop recording after silence and auto-send the transcript to Jarvis. Three knobs live in `frontend/app/page.tsx` inside `startRecording`:
+
+| Parameter | Default | What it does | When to change |
+|---|---|---|---|
+| `silenceThreshold` | `8` | RMS amplitude below this is treated as "silence" (range ~0-127) | Increase to 12-15 if you're in a noisy room and recording never auto-stops. Decrease if it cuts you off mid-word. |
+| `silenceDuration` | `1200` ms | How long silence must persist before the recorder stops | Lower (e.g. 800ms) for snappier responses. Higher (e.g. 2000ms) if you tend to pause mid-thought. |
+| `setInterval(..., 50)` | `50` ms | Polling rate for the VAD loop (20Hz) | Almost never needs changing. Higher = lower CPU; lower = faster reaction. |
+
+The VAD is fully client-side — pure browser APIs (`AudioContext`, `AnalyserNode`), no network or backend involvement, so it works offline.
+
 ## Known Gaps / Future Work
 
 - **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request to build the message context for Claude. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
