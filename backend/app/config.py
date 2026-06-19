@@ -7,8 +7,6 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
     database_url: str | None = None
-    supabase_jwt_secret: str | None = None
-    dev_user_id: str = "00000000-0000-0000-0000-000000000001"
     frontend_origin: str = "http://localhost:3000"
     embedding_provider: str = "local"
     embedding_model: str = "all-MiniLM-L6-v2"

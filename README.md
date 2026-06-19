@@ -1,47 +1,36 @@
 # Jarvis
 
-Jarvis is a personal AI assistant app. This repository is being built in phases.
+A personal AI assistant — built for one user (me). The goal is a private, locally-runnable assistant that can chat, remember facts I share, talk back, and eventually learn to behave like me.
 
-Current phase: **Phase 1 - Core Text Agent**
+## Direction
+
+- **Single-user, no auth.** Multi-user scaffolding (JWT verification, `user_id` filtering, row-level security) is being removed.
+- **Local-first AI.** Currently uses Anthropic Claude; transitioning to a local LLM via Ollama (Llama 3.1 8B as the starting point) so chat works offline and stays private.
+- **Multi-device access.** Will eventually be reachable from laptop, phone, desktop, and ultimately a dedicated device.
+- **Personalization.** A strong persona prompt + the existing semantic memory layer first. LoRA fine-tuning on samples of my own writing later.
+
+The previous version (multi-user-capable, Claude-only) is preserved on the `multi-user-snapshot` branch.
 
 ## Stack
 
-- Frontend: Next.js, React, Tailwind, shadcn/ui-style local components
-- Backend: FastAPI
-- Database: Supabase Postgres
-- AI: Anthropic Claude API
-- Auth: Supabase Auth planned; Phase 1 uses a dev user locally unless JWT verification is configured
-
-Later phases will add pgvector memory recall, Redis/Celery jobs, higher-quality voice (e.g. Whisper + ElevenLabs), reminders, daily briefing, monitoring, and deployment wiring.
-
-## Phase 1 Scope
-
-Included:
-
-- Browser chat UI
-- FastAPI `/api/chat` endpoint
-- Anthropic Claude API integration
-- Conversation continuation by replaying full message history from Supabase on each request
-- Supabase Postgres tables for conversations and messages
-- Local dev fallback when `ANTHROPIC_API_KEY` or `DATABASE_URL` is not configured
-- Voice input/output via Web Speech API (Chrome/Edge only)
-
-Not included yet:
-
-
-- Durable user-approved memories
-- Memory search with pgvector
-- Conversation summarization jobs
-- Reminders
-- Daily briefing
-- Memory inspection/deletion UI
-- Production auth flow
+| Layer | Choice | Notes |
+|---|---|---|
+| Frontend | Next.js, React, Tailwind | Dark, minimal, browser-only |
+| Backend | FastAPI | Async, single-process |
+| Database | Supabase Postgres + pgvector | Local Postgres possible later |
+| LLM | Anthropic Claude (today) → Ollama local LLM (next) | Swappable via a provider abstraction in `agent.py` |
+| Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) | Local, 384-dim, free |
+| STT | `faster-whisper` (base model) | Local, runs on CPU |
+| TTS | Piper (`en_US-amy-medium`) | Local, runs on CPU |
+| Voice activity | Browser-side VAD via `AudioContext` | Pure JS, offline |
 
 ## Repository Layout
 
 ```text
-frontend/   Next.js app
-backend/    FastAPI app
+frontend/                  Next.js app
+backend/                   FastAPI app
+backend/models/piper/      Piper voice model files (gitignored)
+backend/supabase/migrations/   SQL migrations applied via migrate.py
 ```
 
 ## Backend Setup
@@ -61,18 +50,21 @@ Edit `backend/.env`:
 ANTHROPIC_API_KEY=your_anthropic_api_key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 DATABASE_URL=your_supabase_postgres_connection_string
-SUPABASE_JWT_SECRET=
-DEV_USER_ID=00000000-0000-0000-0000-000000000001
 FRONTEND_ORIGIN=http://localhost:3000
+EMBEDDING_PROVIDER=local
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+PIPER_MODEL_PATH=models/piper/en_US-amy-medium.onnx
+WHISPER_MODEL=base
 ```
 
-`ANTHROPIC_API_KEY` is optional for local smoke testing. Without it, the backend returns a dev-mode response.
+Download the Piper voice files into `backend/models/piper/`:
+- [en_US-amy-medium.onnx](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx)
+- [en_US-amy-medium.onnx.json](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json)
 
-`DATABASE_URL` is optional for local smoke testing. Without it, chat still works, but conversation messages are not persisted.
-
-Start the backend:
+Run migrations and start the backend:
 
 ```bash
+python migrate.py
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -81,16 +73,6 @@ Health check:
 ```bash
 curl http://localhost:8000/health
 ```
-
-## Supabase Setup
-
-Create a Supabase project and run this migration in the SQL editor:
-
-```text
-backend/supabase/migrations/001_phase_1_core_chat.sql
-```
-
-For Phase 1, the FastAPI backend filters all conversation and message reads/writes by `user_id`. Full Supabase Auth integration comes later; if `SUPABASE_JWT_SECRET` is empty, the API uses `DEV_USER_ID`.
 
 ## Frontend Setup
 
@@ -108,47 +90,34 @@ Edit `frontend/.env.local` if your backend is not running on port `8000`:
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ```
 
-Open:
-
-```text
-http://localhost:3000
-```
-
-## Operating Phase 1
-
-1. Start the FastAPI backend from `backend/`.
-2. Start the Next.js frontend from `frontend/`.
-3. Open `http://localhost:3000`.
-4. Send a message in the chat box.
-5. If `ANTHROPIC_API_KEY` is configured, Jarvis responds through the Anthropic Claude API.
-6. If `DATABASE_URL` is configured and the Supabase migration has been run, messages are persisted to Supabase.
+Open `http://localhost:3000`.
 
 ## API
 
 ### `POST /api/chat`
-
-Request:
-
-```json
-{
-  "message": "Hello Jarvis",
-  "conversation_id": null
-}
-```
-
-Response:
+Send a message, get a reply. Maintains conversation context via `conversation_id`.
 
 ```json
-{
-  "conversation_id": "uuid",
-  "assistant_message": "Hi there...",
-  "response_id": "msg_..."
-}
+{ "message": "Hello", "conversation_id": null }
 ```
 
-### `GET /api/conversations/{conversation_id}`
+### `GET /api/conversations/{id}`
+Fetch a persisted conversation with all its messages.
 
-Returns a persisted conversation with messages. Requires `DATABASE_URL`.
+### `POST /api/memories`
+Save a fact: `{ "content": "I prefer tea over coffee" }`. Stores text + embedding for semantic retrieval.
+
+### `GET /api/memories`
+List all saved memories.
+
+### `DELETE /api/memories/{id}`
+Remove a saved memory.
+
+### `POST /api/transcribe`
+Multipart audio upload → text. Uses faster-whisper.
+
+### `POST /api/speak`
+JSON `{ "text": "..." }` → WAV audio bytes. Uses Piper.
 
 ## Voice Tuning
 
@@ -162,31 +131,26 @@ The frontend mic uses browser-side Voice Activity Detection (VAD) to auto-stop r
 
 The VAD is fully client-side — pure browser APIs (`AudioContext`, `AnalyserNode`), no network or backend involvement, so it works offline.
 
+## Roadmap
+
+Steps in roughly the order they'll be done:
+
+1. **Strip auth and `user_id` everywhere.** Remove `auth.py` JWT, drop `user_id` columns via migration, remove RLS policies. Backend becomes single-user.
+2. **Swap Claude for Ollama.** Add `OllamaProvider` next to the existing Anthropic call in `agent.py`. Default model: `llama3.1:8b`.
+3. **Write a strong persona system prompt.** Capture voice, values, defaults. Iterate as I use it.
+4. **Bind the backend to `0.0.0.0`** and connect from my phone over LAN. Optionally Tailscale for remote.
+5. **LoRA fine-tuning.** Collect a personal dataset (messages, journal, emails). Train a persona adapter.
+6. **Package as a desktop app** via Tauri. Bundle the LLM, voice models, and Postgres for one-click install.
+7. **Dedicated device.** Raspberry Pi 5 or small NUC running everything 24/7.
+
 ## Known Gaps / Future Work
 
-- **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request to build the message context for Claude. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
-- **Voyage AI embedding provider** — embeddings currently run locally via `sentence-transformers` (`all-MiniLM-L6-v2`). The `EmbeddingProvider` abstraction in `app/embeddings.py` is designed to be swappable; adding a `VoyageProvider` behind the same interface would let `EMBEDDING_PROVIDER=voyage` in `.env` switch to Voyage's hosted API for better embedding quality (at the cost of an API key and per-request network latency).
-- **Auto-extraction of memories with approval** — memory saving is currently fully manual: the user clicks "Save to memory" on a message and edits the text before storing. A future improvement is to run a second Claude call after each chat turn asking what durable facts the user shared, then surface those candidates in the UI with Save/Skip buttons. Approved candidates flow through the existing embed-and-store pipeline. Done well, this makes Jarvis feel proactive rather than a passive notepad — but requires careful prompt engineering to avoid junk suggestions.
-- **Clean newlines from memories before saving** — chat messages can contain intentional newlines (Shift+Enter for multi-line input). When such a message is saved as a memory, the newlines are stored verbatim. For a well-formed knowledge base, the save flow should strip or collapse newlines before persisting (either automatically, or by having the edit-before-save modal default to a flattened version of the source text).
-- **Voice-reactive Jarvis orb** — the background orb currently pulses on a fixed timer. When Jarvis speaks (TTS), the orb's pulse should sync to the rhythm/amplitude of the voice output, similar to the Iron Man arc reactor reacting to JARVIS's speech. Likely implementation: tap the Web Audio API's `AnalyserNode` on the TTS audio stream, sample the frequency/amplitude in real time, and drive the orb's `transform: scale()` and `opacity` from those values via CSS custom properties.
-- **Loading state during chat responses** — Claude can take 1-3 seconds to reply. The frontend currently has no visual feedback during that wait: the input stays editable, the button looks the same, and the user sees nothing happen until the response arrives. A future improvement is to disable the input while a request is in flight and show a "Jarvis is thinking..." indicator in the messages area (or pulse the orb faster as a signal).
-- **Batched-thought input (stack of inputs)** — instead of the standard one-message-at-a-time chat, let the user queue up multiple thoughts before sending. UX: each thought is added to a visible stack above the input via a `+` button; the Send button submits the whole stack as one message to Claude formatted as a bulleted list, displayed in the chat as a single combined user bubble. Useful when the user wants to dump several related questions or points and get one cohesive reply addressing all of them. Each stack item needs a stable id and a remove (×) button.
-- **Local voice (STT + TTS)** — voice is not yet wired into the new frontend. The intended stack is fully local and free: `faster-whisper` for speech-to-text and `Piper` or `Kokoro` for text-to-speech. Architecture mirrors the embedding provider — load the model at backend startup via lifespan, expose `POST /api/transcribe` and `POST /api/speak` endpoints, and have the frontend record audio via `MediaRecorder` for input and play back the audio response for output. Reference repos:
-  - faster-whisper (STT): https://github.com/SYSTRAN/faster-whisper
-  - Piper (TTS, maintenance-mode original): https://github.com/rhasspy/piper
-  - Piper (TTS, active fork): https://github.com/OHF-Voice/piper1-gpl
-  - Piper voice samples: https://rhasspy.github.io/piper-samples/
-  - Kokoro (TTS, 82M params, high quality): https://github.com/hexgrad/kokoro
-
-## Next Phase
-
-Phase 2 should add the memory system:
-
-- propose memory candidates from chat
-- require user approval before saving memories
-- store approved memories in Supabase
-- embed memories with a local model (e.g. `sentence-transformers`) by default, with Voyage AI as a configurable alternative provider behind a shared abstraction
-- retrieve relevant memories with pgvector during chat
-- add inspect/delete memory endpoints and UI
-
-Per instruction, work stops after Phase 1 until you explicitly ask to continue.
+- **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
+- **Voyage AI embedding provider** — embeddings currently run locally via `sentence-transformers`. The `EmbeddingProvider` abstraction in `app/embeddings.py` is designed to be swappable; adding a `VoyageProvider` behind the same interface would let `EMBEDDING_PROVIDER=voyage` in `.env` switch to Voyage's hosted API for better embedding quality.
+- **Auto-extraction of memories with approval** — memory saving is currently fully manual: I click "Save to memory" on a message and edit before storing. A future improvement is to run a second LLM call after each chat turn asking what durable facts I shared, then surface those candidates in the UI with Save/Skip buttons.
+- **Clean newlines from memories before saving** — chat messages can contain intentional newlines (Shift+Enter for multi-line input). When such a message is saved as a memory, the newlines are stored verbatim. For a well-formed knowledge base, the save flow should strip or collapse newlines before persisting.
+- **Voice-reactive Jarvis orb** — the background orb currently pulses on a fixed timer. When Jarvis speaks, the orb's pulse should sync to the rhythm/amplitude of the voice output. Likely implementation: tap the Web Audio API's `AnalyserNode` on the TTS audio stream, sample frequency/amplitude in real time, and drive the orb's `transform: scale()` and `opacity` via CSS custom properties.
+- **Loading state during chat responses** — local LLMs can take longer than Claude to reply. The frontend currently has no visual feedback during that wait. Disable the input while a request is in flight and show a "thinking" indicator (or pulse the orb faster).
+- **Batched-thought input (stack of inputs)** — let me queue up multiple thoughts before sending. Each thought is added to a visible stack above the input via a `+` button; the Send button submits the whole stack as one bulleted message to the LLM, displayed in the chat as a single combined user bubble.
+- **Conversation history restore on refresh** — currently a page refresh loses all messages in the visible chat. Restore from Supabase using a `conversation_id` saved in `sessionStorage`.
+- **Local Postgres + pgvector** — for full offline operation, replace Supabase with a local Postgres instance (or SQLite + `sqlite-vec` for simpler distribution). The `DATABASE_URL` abstraction makes this a config-level change.

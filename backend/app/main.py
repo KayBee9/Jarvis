@@ -1,12 +1,12 @@
+from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File
+from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import agent, memories, embeddings, voice
-from app.auth import get_current_user_id
+from app import agent, embeddings, memories, voice
 from app.config import get_settings
 from app.db import (
     add_message,
@@ -16,17 +16,22 @@ from app.db import (
     get_db,
     get_previous_response_id,
 )
+from app.models import (
+    ChatRequest,
+    ChatResponse,
+    Conversation,
+    Memory,
+    MemoryCreateRequest,
+    SpeakRequest,
+)
 
-from app.models import ChatRequest, ChatResponse, Conversation, MemoryCreateRequest, Memory , SpeakRequest
-
-from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
-    embeddings.init_provider() #loads the embedding model at startup
-    voice.init_tts() #loads the TTS model at startup
-    voice.init_stt() #loads the STT model at startup
+    embeddings.init_provider()
+    voice.init_tts()
+    voice.init_stt()
     yield
     await database.close()
 
@@ -34,14 +39,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 settings = get_settings()
 app = FastAPI(title="Jarvis API", version="0.1.0", lifespan=lifespan)
 
-#Runs before and after each request from a stack, meaning last in this list runs first before the request
-# and first in this list first after the request (5,4,3,2,1,request, response, 1,2,3,4,5)
 app.add_middleware(
-    CORSMiddleware, #1
-    allow_origins=[settings.frontend_origin], #2 
-    allow_credentials=True, #3 
-    allow_methods=["*"], #4 (allow all HTTP methods)
-    allow_headers=["*"], #5 (allow all HTTP headers)
+    CORSMiddleware,
+    allow_origins=[settings.frontend_origin],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -62,7 +65,6 @@ async def health(
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
-    user_id: str = Depends(get_current_user_id),
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> ChatResponse:
     conversation_id = payload.conversation_id
@@ -71,26 +73,25 @@ async def chat(
 
     if conn:
         if not conversation_id:
-            conversation_id = await create_conversation(conn, user_id)
-        previous_response_id = await get_previous_response_id(conn, conversation_id, user_id)
-        await add_message(conn, conversation_id, user_id, "user", payload.message)
+            conversation_id = await create_conversation(conn)
+        previous_response_id = await get_previous_response_id(conn, conversation_id)
+        await add_message(conn, conversation_id, "user", payload.message)
         query_embedding = await embeddings.get_provider().embed(payload.message)
-        memory_rows = await memories.search_memories(conn, user_id, query_embedding)
-        relevant_memories = [memory["content"] for memory in memory_rows]
+        memory_rows = await memories.search_memories(conn, query_embedding)
+        relevant_memories = [m["content"] for m in memory_rows]
     else:
         conversation_id = conversation_id or uuid4()
 
     assistant_message, response_id = await agent.generate_reply(
         payload.message,
         previous_response_id=previous_response_id,
-        relevant_memories=relevant_memories
+        relevant_memories=relevant_memories,
     )
 
     if conn:
         await add_message(
             conn,
             conversation_id,
-            user_id,
             "assistant",
             assistant_message,
             response_id=response_id,
@@ -106,51 +107,50 @@ async def chat(
 @app.get("/api/conversations/{conversation_id}", response_model=Conversation)
 async def get_conversation(
     conversation_id: UUID,
-    user_id: str = Depends(get_current_user_id),
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> Conversation:
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
 
-    conversation = await fetch_conversation(conn, conversation_id, user_id)
+    conversation = await fetch_conversation(conn, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     return conversation
 
+
 @app.post("/api/memories")
 async def create_memory(
     payload: MemoryCreateRequest,
-    user_id: str = Depends(get_current_user_id),
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> dict[str, str]:
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
-    
+
     embedding = await embeddings.get_provider().embed(payload.content)
-    memory_id = await memories.create_memory_db(conn, user_id, payload.content, embedding)
+    memory_id = await memories.create_memory_db(conn, payload.content, embedding)
     return {"memory_id": str(memory_id)}
+
 
 @app.get("/api/memories", response_model=list[Memory])
 async def list_memories(
-    user_id: str = Depends(get_current_user_id),
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> list[dict]:
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
 
-    return await memories.list_memories_db(conn, user_id)
+    return await memories.list_memories_db(conn)
+
 
 @app.delete("/api/memories/{memory_id}")
 async def delete_memory(
     memory_id: UUID,
-    user_id: str = Depends(get_current_user_id),
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> dict[str, str]:
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
 
-    success = await memories.delete_memory_db(conn, user_id, memory_id)
+    success = await memories.delete_memory_db(conn, memory_id)
     if not success:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -162,6 +162,7 @@ async def speak(payload: SpeakRequest) -> Response:
     provider = voice.get_tts()
     audio_bytes = await provider.synthesize(payload.text)
     return Response(content=audio_bytes, media_type="audio/wav")
+
 
 @app.post("/api/transcribe")
 async def transcribe(file: UploadFile = File(...)) -> dict[str, str]:
