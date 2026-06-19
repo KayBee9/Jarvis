@@ -14,7 +14,7 @@ from app.db import (
     database,
     fetch_conversation,
     get_db,
-    get_previous_response_id,
+    fetch_messages,
 )
 from app.models import (
     ChatRequest,
@@ -30,6 +30,7 @@ from app.models import (
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
     embeddings.init_provider()
+    agent.init__provider()
     voice.init_tts()
     voice.init_stt()
     yield
@@ -68,23 +69,26 @@ async def chat(
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> ChatResponse:
     conversation_id = payload.conversation_id
-    previous_response_id = None
+    history: list[dict[str, str]] = []
     relevant_memories: list[str] = []
 
     if conn:
         if not conversation_id:
             conversation_id = await create_conversation(conn)
-        previous_response_id = await get_previous_response_id(conn, conversation_id)
+        # Fetch history BEFORE adding the new user message,
+        # so the LLM doesn't see the new message as part of the history
+        history = await fetch_messages(conn, conversation_id)
         await add_message(conn, conversation_id, "user", payload.message)
-        query_embedding = await embeddings.get_provider().embed(payload.message)
-        memory_rows = await memories.search_memories(conn, query_embedding)
+        # Inject ALL memories every turn. Cheap while the memory set is small;
+        # see README "Smarter memory retrieval" for scaling strategies.
+        memory_rows = await memories.list_memories_db(conn)
         relevant_memories = [m["content"] for m in memory_rows]
     else:
         conversation_id = conversation_id or uuid4()
 
-    assistant_message, response_id = await agent.generate_reply(
+    assistant_message = await agent.generate_reply(
         payload.message,
-        previous_response_id=previous_response_id,
+        history=history,
         relevant_memories=relevant_memories,
     )
 
@@ -94,13 +98,16 @@ async def chat(
             conversation_id,
             "assistant",
             assistant_message,
-            response_id=response_id,
         )
-
+        # Extract durable facts from the user#s message and saves them automatically
+        extracted_facts = await agent.extract_memories(payload.message)
+        for fact in extracted_facts:
+            fact_embedding = await embeddings.get_provider().embed(fact)
+            await memories.create_memory_db(conn, fact, fact_embedding)
+            
     return ChatResponse(
         conversation_id=conversation_id,
         assistant_message=assistant_message,
-        response_id=response_id,
     )
 
 

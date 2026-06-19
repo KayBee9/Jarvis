@@ -70,7 +70,6 @@ async def add_message(
     conversation_id: UUID,
     role: str,
     content: str,
-    response_id: str | None = None,
 ) -> None:
     async with conn.transaction():
         await conn.execute(
@@ -82,25 +81,15 @@ async def add_message(
             role,
             content,
         )
-        if response_id:
-            await conn.execute(
-                """
-                update conversations
-                set last_response_id = $1, updated_at = now()
-                where id = $2
-                """,
-                response_id,
-                conversation_id,
-            )
-        else:
-            await conn.execute(
-                """
-                update conversations
-                set updated_at = now()
-                where id = $1
-                """,
-                conversation_id,
-            )
+        await conn.execute(
+            """
+            update conversations
+            set updated_at = now()
+            where id = $1
+            """,
+            conversation_id,
+        )
+
 
 
 async def fetch_conversation(
@@ -134,3 +123,19 @@ async def fetch_conversation(
         updated_at=conversation["updated_at"],
         messages=[Message(**dict(row)) for row in rows],
     )
+
+async def fetch_messages(
+    conn: asyncpg.Connection, conversation_id: UUID
+) -> list[dict[str, str]]:
+    """Return all messages for a conversation in chronological order,
+       formatted for LLM Input"""
+    rows = await conn.fetch(
+        """
+        select role, content
+        from messages
+        where conversation_id = $1
+        order by created_at asc
+        """,
+        conversation_id,
+    )
+    return [{"role": row["role"], "content": row["content"]} for row in rows]

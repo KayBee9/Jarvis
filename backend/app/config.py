@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
     piper_model_path: str = "models/piper/en_US-amy-medium.onnx"
     whisper_model: str = "base"
+    llm_provider: str = "ollama"
+    ollama_model: str = "llama3.1:8b"
+    ollama_base_url: str = "http://localhost:11434"
 
 
 

@@ -13,7 +13,6 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     conversation_id: UUID
     assistant_message: str
-    response_id: str | None = None
 
 
 class Message(BaseModel):
