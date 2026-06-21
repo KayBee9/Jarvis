@@ -23,6 +23,7 @@ from app.models import (
     Memory,
     MemoryCreateRequest,
     SpeakRequest,
+    PendingMemoryChanges,
 )
 
 
@@ -30,7 +31,7 @@ from app.models import (
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
     embeddings.init_provider()
-    agent.init__provider()
+    agent.init_provider()
     voice.init_tts()
     voice.init_stt()
     yield
@@ -103,8 +104,35 @@ async def chat(
         extracted_facts = await agent.extract_memories(payload.message)
         for fact in extracted_facts:
             fact_embedding = await embeddings.get_provider().embed(fact)
-            await memories.create_memory_db(conn, fact, fact_embedding)
             
+            #Find similar existing memories to reconcile against.
+            similar = await memories.search_memories(
+                conn, fact_embedding, top_k=5, min_similarity=0.5
+            )
+
+            #Ask the LLM how to handle this fact
+            decision = await agent.reconcile_memory(fact, similar)
+
+            if decision["action"] == "ADD":
+                await memories.create_memory_db(conn, fact, fact_embedding)
+            elif decision["action"] == "SKIP":
+                pass
+            elif decision["action"] in ("REPLACE","DELETE"):
+                # Find the target's current content for the snapshot
+                target = next(
+                    (m for m in similar if str(m["id"]) == decision["target_id"]),
+                    None,
+                )
+                if target is None:
+                    continue #safety: target not in similar list, something went wrong
+                await memories.create_pending_change(
+                    conn,
+                    action=decision["action"],
+                    target_memory_id=UUID(decision["target_id"]),
+                    target_content=target["content"],
+                    proposed_content=fact if decision["action"] == "REPLACE" else None,
+                )
+
     return ChatResponse(
         conversation_id=conversation_id,
         assistant_message=assistant_message,
@@ -162,6 +190,59 @@ async def delete_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     return {"detail": "Memory deleted successfully"}
+
+@app.get("/api/memory-changes", response_model=list[PendingMemoryChanges])
+async def list_memory_changes(
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> list[dict]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+    
+    return await memories.list_pending_changes(conn)
+
+@app.post("/api/memory-changes/{change_id}/approve")
+async def approve_memory_change(
+    change_id: UUID,
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> dict[str, str]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+    
+    change = await memories.get_pending_change(conn, change_id)
+    if change is None:
+        raise HTTPException(status_code=404, detail="Pending change not found")
+
+
+    if change["action"] == "REPLACE":
+        new_content = change["proposed_content"]
+        if not new_content:
+            raise HTTPException(status_code=500, detail="REPLACE change has no proposed_content")
+        new_embedding = await embeddings.get_provider().embed(new_content)
+        await memories.update_memory_db(
+            conn,
+            change["target_memory_id"],
+            new_content,
+            new_embedding,
+        )
+    elif change["action"] == "DELETE":
+        await memories.delete_memory_db(conn, change["target_memory_id"])
+
+    await memories.delete_pending_change(conn, change_id)
+    return {"detail": "Approved"}
+
+@app.post("/api/memory-changes/{change_id}/skip")
+async def skip_memory_change(
+    change_id: UUID,
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> dict[str, str]:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
+    deleted = await memories.delete_pending_change(conn, change_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Pending change not found")
+
+    return {"detail": "Skipped"}
 
 
 @app.post("/api/speak")

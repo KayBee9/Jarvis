@@ -106,7 +106,7 @@ class AnthropicProvider:
     
 _provider: LLMProvider | None = None
 
-def init__provider() -> LLMProvider:
+def init_provider() -> LLMProvider:
     """Initialize the LLM provider based on config settings. Call once at startup."""
 
     global _provider
@@ -161,3 +161,56 @@ async def extract_memories(message: str) -> list[str]:
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
         # Extraction is best-effort - if the LLM returns garbage, just skip
         return []
+    
+RECONCILE_PROMPT = """
+You decide how to handle a newly-learned fact about the user, in light of similar facts already stored.
+
+Choose ONE action:
+- ADD: the new fact is independent of all existing facts (no conflict, just adjacent topic).
+- REPLACE: the new fact directly updates an existing fact (user moved, changed jobs, updated a preference). Pick which existing fact it replaces.
+- DELETE: the new fact negates an existing fact ("I no longer have X", "I'm not X anymore"). Pick which existing fact to delete.
+- SKIP: the new fact is already represented by an existing one.
+
+Return ONLY valid JSON in this exact shape:
+{"action": "ADD" | "REPLACE" | "DELETE" | "SKIP", "target_id": "uuid string or null"}
+
+Rules:
+- If action is ADD or SKIP, target_id MUST be null.
+- If action is REPLACE or DELETE, target_id MUST be the id of the existing fact this affects.
+""".strip()
+
+async def reconcile_memory(
+        new_fact: str,
+        similar_memories: list[dict],
+) -> dict:
+    """Decide how to handle a new fact given similar existing memories.
+
+    Returns {"action": "ADD"|"REPLACE"|"DELETE"|"SKIP", "target_id": str | None}.
+    Defaults to ADD on any parse failure — the safe choice (never destroys data).
+    """
+    if not similar_memories:
+        return {"action": "ADD", "target_id": None}
+    
+    existing_list = "\n".join(
+        f"- (id: {m['id']}) {m['content']}" for m in similar_memories
+    )
+    user_message = f'NEW FACT: "{new_fact}"\n\nEXISTING SIMILAR FACTS:\n{existing_list}'
+
+    try:
+        response = await get_provider().generate(
+            RECONCILE_PROMPT,
+            [{"role": "user", "content": user_message}],
+        )
+        match = re.search(r"\{[\s\S]*\}", response)
+        if not match:
+            return {"action": "ADD", "target_id": None}
+        data = json.loads(match.group(0))
+        action = data.get("action", "ADD")
+        if action not in ("ADD", "REPLACE", "DELETE", "SKIP"):
+            return {"action": "ADD", "target_id": None}
+        target_id = data.get("target_id")
+        if action in ("REPLACE", "DELETE") and not target_id:
+            return {"action": "ADD", "target_id": None}
+        return {"action": action, "target_id": target_id}
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
+        return {"action": "ADD", "target_id": None}

@@ -40,3 +40,11 @@ class Memory(BaseModel):
 
 class SpeakRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
+
+class PendingMemoryChanges(BaseModel):
+    id : UUID
+    action: Literal["REPLACE", "DELETE"]
+    target_memory_id: UUID
+    target_content: str
+    proposed_content: str | None = None
+    created_at: datetime
