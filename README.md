@@ -11,6 +11,26 @@ A personal AI assistant — built for one user (me). The goal is a private, loca
 
 The previous version (multi-user-capable, Claude-only) is preserved on the `multi-user-snapshot` branch.
 
+## Session Handoff
+
+**For any AI assistant (or future me) continuing this project — read this first to pick up where we left off.** Keep this section updated at the end of each session.
+
+- **Current step in the Roadmap:** Step 4 (bind backend to `0.0.0.0`, connect from phone over LAN). Steps 1-3 complete.
+- **Working style:** Step-by-step teaching. Explain each change; don't dump full solutions in one go. Wait for confirmation before moving to the next sub-step. Ask before big design commits.
+- **Recently added (last session):**
+  - Auto-extraction of durable facts from user messages on every chat turn
+  - Reconciliation pipeline: for each new fact, LLM classifies as ADD / REPLACE / DELETE / SKIP against similar existing memories
+  - Pending-changes system (`pending_memory_changes` table + endpoints) — REPLACE/DELETE require user approval via the memories panel UI
+  - Save-to-memory button now goes through the same reconciliation as auto-extract
+  - Save button removed from assistant messages (only on user messages)
+- **Design choices worth respecting (don't undo without discussing):**
+  - Memory injection = "inject-all" while the memory set is small. See "Smarter memory retrieval" for the scaling escape hatch.
+  - No approval step for ADD / SKIP actions — only REPLACE / DELETE need approval.
+  - Both auto-extract and manual-save go through the shared `save_or_reconcile` helper in `main.py`.
+  - Regex-based JSON parsing for `extract_memories` / `reconcile_memory` — fragile but works. Upgrade to Ollama's `format="json"` if it starts failing more often.
+- **Immediate next action:** Start step 4. Uvicorn `--host 0.0.0.0`, add phone origin to CORS (or open to `*` in dev), point `frontend/.env.local`'s `NEXT_PUBLIC_API_BASE_URL` at the laptop's LAN IP for phone testing, allow port 8000 through Windows firewall if the phone can't reach it.
+- **Blockers / open questions:** None right now.
+
 ## Stack
 
 | Layer | Choice | Notes |
