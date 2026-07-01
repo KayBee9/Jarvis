@@ -18,6 +18,15 @@ type Memory = {
   created_at: string;
 };
 
+type PendingChange = {
+  id: string;
+  action: "REPLACE" | "DELETE";
+  target_memory_id: string;
+  target_content: string;
+  proposed_content: string | null;
+  created_at: string;
+};
+
 // Home page component. Renders the chat UI and manages its state.
 export default function Home() {
   // Current text in the input field.
@@ -44,6 +53,11 @@ export default function Home() {
   const [memories, setMemories] = useState<Memory[]>([]);
   // True while a fetch is in flight
   const [isLoadingMemories, setIsLoadingMemories] = useState(false);
+  // List of pending changes
+  const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
+  // Tracks which changes have in-flight approve/skip request, so we avoid double clicking
+  const [processingChangeIds, setProcessingChangeIds] = useState<Set<string>>(new Set());
+
 
   // Whether the Memorie itself is open or not, in order to delete it
   const [openMemoryId, setOpenMemoryId] = useState<string | null>(null);
@@ -241,7 +255,7 @@ export default function Home() {
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       const silenceThreshold = 8;   // RMS amplitude below this = "silence"
-      const silenceDuration = 1200; // ms of silence before auto-stop
+      const silenceDuration = 2000; // ms of silence before auto-stop
       let lastSpeechTime: number | null = null;
       let hasDetectedSpeech = false;
 
@@ -324,10 +338,66 @@ export default function Home() {
       mediaRecorderRef.current?.stop();
     }
 
+  // Function to load Pending Changes
+  async function loadPendingChanges() {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/memory-changes`);
+      if (!response.ok) throw new Error(`Failed to load pending changes: ${response.status}`);
+      const data = (await response.json()) as PendingChange[];
+      setPendingChanges(data);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  // Memory change APPROVE functions
+
+  async function approveChange(id: string) {
+    setProcessingChangeIds((current) => new Set(current).add(id));
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/memory-changes/${id}/approve`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(`Approve failed: ${response.status}`);
+      // Remove from local pending list and refresh memories (since one changed).
+      setPendingChanges((current) => current.filter((c) => c.id !== id));
+      await loadMemories();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setProcessingChangeIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
+  // Memory change SKIP function
+  async function skipChange(id: string) {
+    setProcessingChangeIds((current) => new Set(current).add(id));
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/memory-changes/${id}/skip`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(`Skip failed: ${response.status}`);
+      setPendingChanges((current) => current.filter((c) => c.id !== id));
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setProcessingChangeIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
   //whenever the panel opens, fetch fresh memories.
   useEffect(() => {
     if (isPanelOpen) {
       void loadMemories();
+      void loadPendingChanges();
     }
   }, [isPanelOpen]);
 
@@ -363,14 +433,16 @@ export default function Home() {
                   >
                     {m.content}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setMemoryDraft({ memoryId: m.id, content: m.content })}
-                    disabled={isSaved || isSaving}
-                    className="text-xs text-muted hover:text-foreground disabled:cursor-default px-2"
-                  >
-                    {isSaved ? "✓ Saved" : isSaving ? "Saving..." : "Save to memory"}
-                  </button>
+                  {m.role === "user" && (
+                    <button
+                      type="button"
+                      onClick={() => setMemoryDraft({ memoryId: m.id, content: m.content })}
+                      disabled={isSaved || isSaving}
+                      className="text-xs text-muted hover:text-foreground disabled:cursor-default px-2"
+                    >
+                      {isSaved ? "✓ Saved" : isSaving ? "Saving..." : "Save to memory"}
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -438,6 +510,53 @@ export default function Home() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-10">
+              {/* === Pending changes section (NEW) === */}
+              {pendingChanges.length > 0 && (
+                <div className="mb-4 space-y-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">
+                    Pending Changes
+                  </h3>
+                  {pendingChanges.map((change) => {
+                    const isProcessing = processingChangeIds.has(change.id);
+                    return (
+                      <div
+                        key={change.id}
+                        className="rounded-xl border border-yellow-600/40 bg-yellow-950/20 p-3 text-sm"
+                      >
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="rounded-full bg-yellow-600/30 px-2 py-0.5 text-xs font-medium text-yellow-200">
+                            {change.action}
+                          </span>
+                        </div>
+                        <p className="text-muted line-through">{change.target_content}</p>
+                        {change.proposed_content && (
+                          <p className="mt-1 text-foreground">{change.proposed_content}</p>
+                        )}
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => approveChange(change.id)}
+                            disabled={isProcessing}
+                            className="rounded-full bg-foreground px-3 py-1 text-xs text-background disabled:opacity-50"
+                          >
+                            ✓ Approve
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => skipChange(change.id)}
+                            disabled={isProcessing}
+                            className="rounded-full border border-border px-3 py-1 text-xs text-muted hover:text-foreground disabled:opacity-50"
+                          >
+                            ✗ Skip
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Existing memory list*/}
               {isLoadingMemories ? (
                 <p className="text-sm text-muted">Loading...</p>
               ) : memories.length === 0 ? (

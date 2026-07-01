@@ -63,6 +63,42 @@ async def health(
             db_ok = False
     return {"ok": True, "database_configured": db_ok}
 
+async def save_or_reconcile(
+    conn: asyncpg.Connection,
+    content: str,
+    embedding: list[float],    
+) -> dict[str, str]:
+    """Reconcile a new fact against similar existing memories.
+    Returns the action taken and the id of the new memory or pending change."""
+    similar = await memories.search_memories(
+        conn, embedding, top_k=5, min_similarity=0.5
+    )
+    decision = await agent.reconcile_memory(content, similar)
+
+    if decision["action"] == "ADD":
+        memory_id = await memories.create_memory_db(conn, content, embedding)
+        return {"action": "ADD", "memory_id": str(memory_id)}
+    if decision["action"] == "SKIP":
+        return {"action": "SKIP"}
+    
+    # REPLACE or DELETE - look up the target, saved as pending change
+    target = next(
+        (m for m in similar if str(m["id"]) == decision["target_id"]),
+        None,
+    )
+    if target is None:
+        memory_id = await memories.create_memory_db(conn, content, embedding)
+        return {"action": "ADD", "memory_id": str(memory_id)}
+
+    change_id = await memories.create_pending_change(
+        conn,
+        action=decision["action"],
+        target_memory_id=UUID(decision["target_id"]),
+        target_content=target["content"],
+        proposed_content=content if decision["action"] == "REPLACE" else None,
+    )
+    return {"action": decision["action"], "change_id": str(change_id)}
+
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
@@ -105,33 +141,7 @@ async def chat(
         for fact in extracted_facts:
             fact_embedding = await embeddings.get_provider().embed(fact)
             
-            #Find similar existing memories to reconcile against.
-            similar = await memories.search_memories(
-                conn, fact_embedding, top_k=5, min_similarity=0.5
-            )
-
-            #Ask the LLM how to handle this fact
-            decision = await agent.reconcile_memory(fact, similar)
-
-            if decision["action"] == "ADD":
-                await memories.create_memory_db(conn, fact, fact_embedding)
-            elif decision["action"] == "SKIP":
-                pass
-            elif decision["action"] in ("REPLACE","DELETE"):
-                # Find the target's current content for the snapshot
-                target = next(
-                    (m for m in similar if str(m["id"]) == decision["target_id"]),
-                    None,
-                )
-                if target is None:
-                    continue #safety: target not in similar list, something went wrong
-                await memories.create_pending_change(
-                    conn,
-                    action=decision["action"],
-                    target_memory_id=UUID(decision["target_id"]),
-                    target_content=target["content"],
-                    proposed_content=fact if decision["action"] == "REPLACE" else None,
-                )
+            await save_or_reconcile(conn, fact, fact_embedding)
 
     return ChatResponse(
         conversation_id=conversation_id,
@@ -163,8 +173,7 @@ async def create_memory(
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
 
     embedding = await embeddings.get_provider().embed(payload.content)
-    memory_id = await memories.create_memory_db(conn, payload.content, embedding)
-    return {"memory_id": str(memory_id)}
+    return await save_or_reconcile(conn, payload.content, embedding)
 
 
 @app.get("/api/memories", response_model=list[Memory])
