@@ -89,6 +89,30 @@ export default function Home() {
   // Holds the active timeout for the VAD, so it can be cleared and restarted on every new audio chunk
   const vadIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Persistent audio element that gets "unlocked" on the first user gesture.
+  // iOS Safari requires audio playback to be attributed to a recent trap;
+  // after the first play(), the element is trusted for the rest of the session
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    const unlock = () => {
+      if (audioRef.current) return;
+      const audio = new Audio();
+      // Tiny silent WAV - enough to satisfy the autoplay policy
+      audio.src = 
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      audio.play().catch(() => {});
+      audioRef.current = audio;
+    };
+    document.addEventListener("touchstart", unlock, { once: true });
+    document.addEventListener("mousedown", unlock, { once: true });
+    return () => {
+      document.removeEventListener("touchstart", unlock);
+      document.removeEventListener("mousedown", unlock);
+    }
+  }, []);
+
+
   // Whenever messages change, scroll that bottom element into view.
   useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -243,7 +267,9 @@ export default function Home() {
       if (!response.ok) throw new Error(`Speak request failed with ${response.status}`);
       const Blob = await response.blob();
       const url = URL.createObjectURL(Blob);
-      const audio = new Audio(url);
+      // Reuse the pre-unlocked audio element (safe on iOS after first tap)
+      const audio = audioRef.current ?? new Audio();
+      audio.src = url;
       audio.onended = () => URL.revokeObjectURL(url);
       await audio.play();
     } catch (error) {
