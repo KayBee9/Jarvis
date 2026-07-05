@@ -85,7 +85,7 @@ Run migrations and start the backend:
 
 ```bash
 python migrate.py
-uvicorn app.main:app --reload --port 8000
+.\start.ps1
 ```
 
 Health check:

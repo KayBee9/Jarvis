@@ -27,6 +27,17 @@ type PendingChange = {
   created_at: string;
 };
 
+// UUID v4 generator using crypto.getRandomValues so it works over plain HTTP
+// (crypto.randomUUID requires a secure context — HTTPS or localhost).
+function generateId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // UUID v4 marker
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // UUID variant marker
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // Home page component. Renders the chat UI and manages its state.
 export default function Home() {
   // Current text in the input field.
@@ -89,7 +100,7 @@ export default function Home() {
     if (!trimmed) return;
 
     const userMessage: Message = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       role: "user",
       content: trimmed,
     };
@@ -114,7 +125,7 @@ export default function Home() {
 
 
       const jarvisMessage: Message = {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "jarvis",
         content: data.assistant_message,
       };

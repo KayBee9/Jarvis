@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --experimental-https --experimental-https-key ../backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.key --experimental-https-cert ../backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.crt",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
+
   "dependencies": {
     "next": "16.2.6",
     "react": "19.2.4",
