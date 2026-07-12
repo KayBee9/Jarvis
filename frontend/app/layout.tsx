@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -17,6 +17,13 @@ export const metadata: Metadata = {
   description: "Personal AI assistant",
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor:"#0a0a0a",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -25,9 +32,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-[100dvh] antialiased`}
     >
-      <body className="h-screen overflow-hidden flex flex-col">{children}</body>
+      <body className="h-[100dvh] overflow-hidden flex flex-col">{children}</body>
     </html>
   );
 }

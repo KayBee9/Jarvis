@@ -450,7 +450,7 @@ export default function Home() {
         Memories
       </button>
 
-      <div className="flex w-full max-w-3xl flex-1 flex-col px-4 pt-16 pb-6">
+      <div className="flex w-full max-w-3xl flex-1 flex-col px-4 pt-16 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         <div className="flex-1 min-h-0 overflow-y-auto space-y-3">
           {
             messages.map((m) => {
@@ -491,7 +491,7 @@ export default function Home() {
           onSubmit={handleSubmit}  
         >  
           <textarea
-            className="flex-1 resize-none bg-transparent outline-none placeholder:text-muted field-sizing-content max-h-32"
+            className="flex-1 resize-none bg-transparent outline-none placeholder:text-muted field-sizing-content max-h-32 text-base"
             placeholder="Message Jarvis..."
             value={input}
             onChange={(e) => setInput(e.target.value)}

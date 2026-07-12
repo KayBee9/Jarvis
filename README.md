@@ -15,21 +15,25 @@ The previous version (multi-user-capable, Claude-only) is preserved on the `mult
 
 **For any AI assistant (or future me) continuing this project — read this first to pick up where we left off.** Keep this section updated at the end of each session.
 
-- **Current step in the Roadmap:** Step 4 (bind backend to `0.0.0.0`, connect from phone over LAN). Steps 1-3 complete.
+- **Current step in the Roadmap:** Step 5 (LoRA fine-tuning) is next. Steps 1-4 complete.
 - **Working style:** Step-by-step teaching. Explain each change; don't dump full solutions in one go. Wait for confirmation before moving to the next sub-step. Ask before big design commits.
 - **Recently added (last session):**
-  - Auto-extraction of durable facts from user messages on every chat turn
-  - Reconciliation pipeline: for each new fact, LLM classifies as ADD / REPLACE / DELETE / SKIP against similar existing memories
-  - Pending-changes system (`pending_memory_changes` table + endpoints) — REPLACE/DELETE require user approval via the memories panel UI
-  - Save-to-memory button now goes through the same reconciliation as auto-extract
-  - Save button removed from assistant messages (only on user messages)
+  - Step 4 done: LAN + remote access via Tailscale with real Let's Encrypt HTTPS certs. Backend + frontend both serve HTTPS from the same cert (`backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.{crt,key}`, gitignored).
+  - `backend/start.ps1` script bakes the SSL flags into the uvicorn command; frontend's `package.json` dev script bakes the `--experimental-https` flags.
+  - iOS Safari audio autoplay unlock: silent-WAV played on first touch/mousedown, persistent `audioRef` reused for all subsequent TTS playback.
+  - `crypto.randomUUID()` replaced with a `generateId()` polyfill using `crypto.getRandomValues()` since `randomUUID` requires a secure context we don't always have (LAN HTTP was a stepping stone).
+  - Mobile polish: `viewport` export with `viewportFit: "cover"`, `h-[100dvh]` on html/body, `text-base` on the chat textarea (prevents iOS auto-zoom), safe-area padding at the bottom of the chat column.
 - **Design choices worth respecting (don't undo without discussing):**
   - Memory injection = "inject-all" while the memory set is small. See "Smarter memory retrieval" for the scaling escape hatch.
   - No approval step for ADD / SKIP actions — only REPLACE / DELETE need approval.
   - Both auto-extract and manual-save go through the shared `save_or_reconcile` helper in `main.py`.
   - Regex-based JSON parsing for `extract_memories` / `reconcile_memory` — fragile but works. Upgrade to Ollama's `format="json"` if it starts failing more often.
-- **Immediate next action:** Start step 4. Uvicorn `--host 0.0.0.0`, add phone origin to CORS (or open to `*` in dev), point `frontend/.env.local`'s `NEXT_PUBLIC_API_BASE_URL` at the laptop's LAN IP for phone testing, allow port 8000 through Windows firewall if the phone can't reach it.
-- **Blockers / open questions:** None right now.
+  - Certs live in `backend/certs/` and are shared with the frontend via relative path (`../backend/certs/...` in `package.json`). Both servers serve HTTPS with the same Tailscale-provisioned cert.
+  - All URLs use the MagicDNS hostname (`desktop-k5pi7kg.tail5ce535.ts.net`) not IPs — the cert is only valid for the hostname.
+- **Known open bugs (documented in "Known Gaps"):**
+  - Reconciler drops sibling facts as duplicates (e.g. "I like chocolate and meat" saves only one). Quickest fix to try: raise `min_similarity` in `save_or_reconcile` (main.py) from 0.5 to 0.75.
+- **Immediate next action:** Start step 5 (LoRA fine-tuning). Sub-tasks that need scoping: (1) collect a personal dataset — sources could be exported chats, journal entries, emails, this Jarvis conversation history itself. (2) Format for training (Alpaca-style, ShareGPT, or chat template — depends on tooling). (3) Pick training tool (Unsloth is fastest on modest hardware; Axolotl is more flexible; MLX-LM if on Mac). (4) Rent a GPU or run locally if the user has one. (5) Convert LoRA to GGUF and load into Ollama with `Modelfile`.
+- **Blockers / open questions for step 5:** Does the user have GPU access, or need to rent? What sources of "your writing" are willing/available to use as training data? What size base model to fine-tune (`llama3.1:8b` matches current runtime)?
 
 ## Stack
 
@@ -168,6 +172,7 @@ Steps in roughly the order they'll be done:
 - **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
 - **Voyage AI embedding provider** — embeddings currently run locally via `sentence-transformers`. The `EmbeddingProvider` abstraction in `app/embeddings.py` is designed to be swappable; adding a `VoyageProvider` behind the same interface would let `EMBEDDING_PROVIDER=voyage` in `.env` switch to Voyage's hosted API for better embedding quality.
 - **Memory deduplication on auto-extract** — auto-extraction is active: after each chat turn, a second LLM call analyzes the user message and saves any durable facts to the memories table automatically. No approval step (by design). Gap: the extractor doesn't check for existing similar facts before saving, so repeating yourself eventually creates near-duplicate rows. A future improvement is to embed the extracted fact, run a cosine similarity search against existing memories first, and skip the save if any existing fact has similarity ≥ 0.95 (or some tunable threshold). The `search_memories` function in `app/memories.py` already has the right shape — just call it before insert.
+- **Reconciler drops sibling facts as duplicates** — observed: a message like "I like chocolate and meat" ends up with only ONE fact saved (either "Oscar likes chocolate" OR "Oscar likes meat"), never both. Likely cause: after the extractor produces both facts, the first is saved as ADD; when the second fact runs through `save_or_reconcile`, `search_memories` finds the first as semantically similar (both are food preferences), and the LLM reconciler classifies it as SKIP or REPLACE thinking they're the same fact. Reconciler is too aggressive on topical similarity vs. actual conflict. Fix candidates: (1) tighten the `RECONCILE_PROMPT` — spell out that SKIP means "literally the same fact restated," and topical overlap doesn't count. Include a few-shot example like `"Oscar likes chocolate" + "Oscar likes meat"` → `ADD` (different preferences). (2) Raise `min_similarity` on the pre-reconciliation search from 0.5 to 0.7-0.8, so only genuinely near-identical facts trigger reconciliation at all. (3) As a diagnostic, log the reconciler's decision + reasoning to console so we can see which of the two mechanisms is failing.
 - **Smarter memory retrieval** — the chat endpoint currently injects ALL stored memories into every system prompt. This is fine while the memory set is small (~50-200 facts), but eats context window once it grows past several hundred. Strategies for later, roughly ordered by complexity:
   1. **Lower the threshold + larger top-k** — switch back to `search_memories` but with `min_similarity = 0` and `top_k = 20`. Cheapest first attempt. Still misses meta-queries.
   2. **Meta-query detection** — classify questions like "what do you know about me", "tell me about myself", "summarize what you remember" with keyword patterns or a small classifier; for those, fall back to "inject all". Otherwise use semantic search.
