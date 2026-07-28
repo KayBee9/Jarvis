@@ -116,6 +116,37 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
 Open `http://localhost:3000`.
 
+## Tailscale / Multi-Machine Setup
+
+Jarvis runs over HTTPS via a Tailscale MagicDNS hostname (not plain `localhost`) so it works from phone/LAN too — iOS Safari requires a secure context for mic access and `crypto.randomUUID()`. That hostname is hardcoded in **four places**. Moving to a different machine (which gets its own Tailscale hostname) means updating all four:
+
+| File | What to change |
+|---|---|
+| `frontend/.env.local` | `NEXT_PUBLIC_API_BASE_URL=https://<hostname>:8000` |
+| `frontend/package.json` | `dev` script's `--experimental-https-key` / `--experimental-https-cert` paths |
+| `frontend/next.config.ts` | `allowedDevOrigins` |
+| `backend/start.ps1` | `--ssl-keyfile` / `--ssl-certfile` paths |
+| `backend/.env` | `FRONTEND_ORIGIN` — must match the frontend's actual origin or CORS blocks every request |
+
+Certs live in `backend/certs/<hostname>.{crt,key}` (gitignored) and must be (re)generated per machine:
+
+```powershell
+mkdir certs
+tailscale cert --cert-file certs/<hostname>.crt --key-file certs/<hostname>.key <hostname>
+```
+
+**Constraints:**
+- Tailscale hostnames are unique per tailnet — you can't rename one device to match another while both are online. Only rename if you're retiring the old one.
+- A fresh Tailscale install (e.g. after reinstalling Windows) can mint a *different* hostname even on what feels like "the same machine." Check `tailscale status` or the admin console (login.tailscale.com/admin/machines) rather than assuming it matches a prior session.
+
+**Running fully locally, no Tailscale/certs at all:** use plain `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000` (drop the `--ssl-*` flags) and `next dev` (drop `--experimental-https*` in `package.json`), with `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and `FRONTEND_ORIGIN=http://localhost:3000`.
+
+**First-time machine setup gotchas:**
+- PowerShell blocks `.ps1` scripts by default → `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`, or run once via `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
+- Node.js/npm and Ollama are separate installs, not pulled in by `pip install` or `npm install` — install both directly, and open a **new** terminal afterward so PATH updates take effect.
+- Ollama does not auto-pull a model on first API request — `ollama pull <model>` explicitly before starting the backend.
+- `backend/.venv`, `backend/.env`, and `backend/certs/` are all gitignored and machine-specific — recreate them fresh on every new machine (see Backend Setup above).
+
 ## API
 
 ### `POST /api/chat`
@@ -186,5 +217,6 @@ Steps in roughly the order they'll be done:
 - **Batched-thought input (stack of inputs)** — let me queue up multiple thoughts before sending. Each thought is added to a visible stack above the input via a `+` button; the Send button submits the whole stack as one bulleted message to the LLM, displayed in the chat as a single combined user bubble.
 - **Conversation history restore on refresh** — currently a page refresh loses all messages in the visible chat. Restore from Supabase using a `conversation_id` saved in `sessionStorage`.
 - **Local Postgres + pgvector** — for full offline operation, replace Supabase with a local Postgres instance (or SQLite + `sqlite-vec` for simpler distribution). The `DATABASE_URL` abstraction makes this a config-level change.
+- **Built-in calendar and reminders** — rather than integrating with phone-native Calendar/Reminders (Google Calendar API, iCloud CalDAV, etc.), build this functionality directly into Jarvis: own tables (events, reminders with due dates/recurrence), own CRUD endpoints, and Jarvis able to create/query/update them conversationally. Keeps everything local-first and inside Jarvis's own data model instead of depending on a third-party account/API. Tradeoff (discussed and accepted): loses native OS integration (widgets, notifications, cross-device sync) that Google/Apple's apps already provide for free — deliberately choosing full control over that convenience.
 
 after() function??? for next.js
