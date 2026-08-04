@@ -112,11 +112,103 @@ export default function Home() {
     }
   }, []);
 
-
   // Whenever messages change, scroll that bottom element into view.
   useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // On mount, chack if any device is currently active. If so, join the convo
+  useEffect(() => {
+    async function loadInitial() {
+      try {
+        // Refresh case: sessionStorage still has the last conversation ID
+        const storedId = sessionStorage.getItem("conversationId");
+        if (storedId) {
+          const response = await fetch(`${apiBaseUrl}/api/conversations/${storedId}`);
+          if (response.ok) {
+            const data = await response.json();
+            setConversationId(data.id);
+            setMessages(
+              data.messages.map(
+                (m: { id: string; role: string; content: string }) => ({
+                  id: m.id,
+                  role: m.role === "assistant" ? "jarvis" : "user",
+                  content: m.content,
+                }),
+              ),
+            );
+            return;
+          }
+          sessionStorage.removeItem("conversationId"); // stale, clean up
+        }
+
+
+        // Tab-close case OR fresh install: check if any another device is active
+        const response = await fetch(`${apiBaseUrl}/api/conversations/active`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!data) return; // null = no active devices, stay fresh
+
+        setConversationId(data.id);
+        const loaded: Message[] = data.messages.map(
+          (m: { id: string; role: string; content: string }) => ({
+            id: m.id,
+            role: m.role === "assistant" ? "jarvis" : "user",
+            content: m.content,
+          }),
+        );
+        setMessages(loaded);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    void loadInitial();
+  }, []);
+
+  useEffect(() => {
+    if (conversationId) {
+      sessionStorage.setItem("conversationId", conversationId);
+    }
+  }, [conversationId]);
+
+  // Subscribe to SSE for current convo. Reopens when conversation_id changes.
+  useEffect(() => {
+    if (!conversationId) return;
+
+    const eventSource = new EventSource(
+      `${apiBaseUrl}/api/conversations/${conversationId}/stream`,
+    );
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data) as {
+        id: string;
+        role: string;
+        content: string;
+      };
+      const newMessage: Message = {
+        id: data.id,
+        role: data.role === "assistant" ? "jarvis" : "user",
+        content: data.content,
+      };
+      // Dedupe: don't append if we already have this message (e.g., our own send)
+      setMessages((current) => {
+        // Content-based dedupe: if any of the last few messages matches by role+content,
+        // it's an echo of our optimistic add - skip.
+        const recent = current.slice(-5);
+        if (recent.some((m) => m.role === newMessage.role && m.content === newMessage.content)) {
+          return current;
+        }
+        return [...current, newMessage];
+      });
+    };
+
+    eventSource.onerror = (error) => {
+      console.error("SSE error:", error);
+      // EventSource auto-reconnects, no explicit reconnect logic needed
+    }
+
+    return () => eventSource.close();
+  }, [conversationId]);
 
   // Append the input to the messages list and clear the field.
   async function sendMessage(text : string) {
@@ -130,8 +222,6 @@ export default function Home() {
     };
     setMessages((current) => [...current, userMessage]);
     setInput("");
-    
-
 
     try {
       const response = await fetch(`${apiBaseUrl}/api/chat`, {
@@ -439,7 +529,7 @@ export default function Home() {
   }, [isPanelOpen]);
 
   return (
-    <main className="flex flex-1 flex-col items-center">
+    <main className="flex flex-1 min-h-0 flex-col items-center">
       <div className="jarvis-orb" aria-hidden="true" />
 
       <button 
@@ -450,7 +540,7 @@ export default function Home() {
         Memories
       </button>
 
-      <div className="flex w-full max-w-3xl flex-1 flex-col px-4 pt-16 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+      <div className="flex w-full max-w-3xl flex-1 min-h-0 flex-col px-4 pt-16 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
         <div className="flex-1 min-h-0 overflow-y-auto space-y-3">
           {
             messages.map((m) => {
@@ -532,7 +622,7 @@ export default function Home() {
         onClick={() => setIsPanelOpen(false)}
         >
           <aside
-            className="fixed right-0 top-0 flex h-screen w-full max-w-md flex-col border-1 border-border bg-background shadow-2xl"
+            className="fixed right-0 top-0 flex h-[100dvh] w-full max-w-md flex-col border border-border bg-background shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -546,7 +636,7 @@ export default function Home() {
                 ×
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-10">
+            <div className="flex-1 min-h-0 overflow-y-auto p-10">
               {/* === Pending changes section (NEW) === */}
               {pendingChanges.length > 0 && (
                 <div className="mb-4 space-y-2">

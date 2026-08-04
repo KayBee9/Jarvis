@@ -2,9 +2,15 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from uuid import UUID, uuid4
 
+import asyncio
+import json
+from collections import defaultdict
+from datetime import datetime, timezone
+
 import asyncpg
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from app import agent, embeddings, memories, voice
 from app.config import get_settings
@@ -52,6 +58,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Counts active SSE subscribers per conversation. When 0, the entry is removed.
+active_streams: defaultdict[UUID, int] = defaultdict(int)
 
 @app.get("/health")
 async def health(
@@ -175,6 +183,77 @@ async def chat(
         assistant_message=assistant_message,
     )
 
+@app.get("/api/conversations/latest", response_model=Conversation | None)
+async def get_latest_conversation(
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> Conversation | None:
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+
+    row = await conn.fetchrow(
+        "select id from conversations order by updated_at desc limit 1"
+    )
+    if not row:
+        return None
+
+    return await fetch_conversation(conn, row["id"])
+
+@app.get("/api/conversations/active", response_model=Conversation | None)
+async def get_active_conversation(
+    conn: asyncpg.Connection | None = Depends(get_db),
+) -> Conversation | None:
+    """Return the currently-active conversation (any device connected via SSE), or None."""
+    if not conn:
+        raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
+    if not active_streams:
+        return None
+    # Pick any conversation with active subscribers — usually there's just one for a single-user app
+    conv_id = next(iter(active_streams))
+    return await fetch_conversation(conn, conv_id)
+
+@app.get("/api/conversations/{conversation_id}/stream")
+async def stream_conversation(conversation_id: UUID):
+    """SSE stream of new messages for a conversation. Registers presence for the duration."""
+    async def event_generator():
+        active_streams[conversation_id] += 1
+        try:
+            last_seen = datetime.now(timezone.utc)
+            while True:
+                if not database.pool:
+                    return
+
+                async with database.pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """
+                        select id, role, content, created_at
+                        from messages
+                        where conversation_id = $1 and created_at > $2
+                        order by created_at asc
+                        """,
+                        conversation_id,
+                        last_seen,
+                    )
+                for row in rows:
+                    data = {
+                        "id": str(row["id"]),
+                        "role": row["role"],
+                        "content": row["content"],
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                    last_seen = row["created_at"]
+
+                # Heartbeat: SSE comment (line starting with :) is ignored by the browser
+                # but forces a write, which fails and cancels the coroutine if the client
+                # has disconnected - that's what triggers the finally block.
+                yield ": keepalive\n\n"
+                
+                await asyncio.sleep(2)
+        finally:
+            active_streams[conversation_id] -= 1
+            if active_streams[conversation_id] <= 0:
+                del active_streams[conversation_id]
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/conversations/{conversation_id}", response_model=Conversation)
 async def get_conversation(
@@ -294,3 +373,5 @@ async def transcribe(file: UploadFile = File(...)) -> dict[str, str]:
     provider = voice.get_stt()
     text = await provider.transcribe(audio_bytes)
     return {"text": text}
+
+

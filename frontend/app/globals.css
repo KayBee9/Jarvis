@@ -47,3 +47,27 @@ body {
     opacity: 1;
   }
 }
+
+/* Dark-themed scrollbars */
+* {
+  scrollbar-width: thin;                          /* Firefox */
+  scrollbar-color: var(--border) transparent;     /* Firefox: thumb + track */
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--muted);
+}
