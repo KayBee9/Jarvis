@@ -54,6 +54,32 @@ Return ONLY valid JSON in this exact shape:
 {"facts": ["fact 1", "fact 2"]}
 """.strip()
 
+CONSOLIDATION_PROMPT = """
+You analyze a batch of conversation messages and extract every durable fact the user has stated about themselves.
+
+CRITICAL RULES:
+- Extract each fact as a SEPARATE entry in the JSON array. NEVER combine multiple facts into one string.
+- Phrase each fact concisely in third person: "Oscar prefers tea over coffee"
+- Only extract facts the user has STATED — never infer, guess, or fill in gaps.
+
+Examples of atomic splitting:
+- "I like chocolate and meat"
+  → ["Oscar likes chocolate", "Oscar likes meat"]
+- "I moved to Paris last week and my dog Rex is 3 years old"
+  → ["Oscar lives in Paris", "Oscar has a dog named Rex", "Rex is 3 years old"]
+- "I'm not vegetarian anymore"
+  → ["Oscar is not vegetarian"]
+- "How's the weather? Also can you remind me tomorrow?"
+  → []
+
+Categories that count: preferences, biographical details, relationships, ongoing goals or situations.
+Categories that do NOT count: one-time events, questions, requests, opinions about the conversation itself.
+
+Return ONLY valid JSON in this exact shape:
+{"facts": ["fact 1", "fact 2"]}
+""".strip()
+
+
 class LLMProvider(Protocol):
     """Common interface for LLM backend"""
 
@@ -125,6 +151,17 @@ def get_provider() -> LLMProvider:
     if _provider is None:
         raise ValueError("LLM provider not initialized.")
     return _provider
+
+
+_memory_provider: LLMProvider | None = None
+
+def get_memory_provider() -> LLMProvider:
+    """Lazily create the memory LLM provider on first call. Separate from chat provider"""
+    global _memory_provider
+    if _memory_provider is None:
+        settings = get_settings()
+        _memory_provider = OllamaProvider(settings.memory_llm_model, settings.ollama_base_url)
+    return _memory_provider
 
 async def generate_reply(
         message: str, 
@@ -214,3 +251,29 @@ async def reconcile_memory(
         return {"action": action, "target_id": target_id}
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
         return {"action": "ADD", "target_id": None}
+    
+
+async def consolidate_memories(messages_batch: list[dict[str, str]]) -> list[str]:
+    """Batch-extact durable facts from a slice of conversation using the memory LLM"""
+
+    if not messages_batch:
+        return []
+    
+    formatted = "\n\n".join(
+        f"{'USER' if m['role'] == 'user' else 'JARVIS'}: {m['content']}"
+        for m in messages_batch 
+    )
+
+    try:
+        response = await get_memory_provider().generate(
+            CONSOLIDATION_PROMPT,
+            [{"role": "user", "content": formatted}],
+        )
+        match = re.search(r"\{[\s\S]*\}", response)
+        if not match:
+            return []
+        data = json.loads(match.group(0))
+        facts = data.get("facts", [])
+        return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
+        return []

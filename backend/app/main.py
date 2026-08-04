@@ -3,7 +3,7 @@ from typing import AsyncIterator
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import agent, embeddings, memories, voice
@@ -15,6 +15,9 @@ from app.db import (
     fetch_conversation,
     get_db,
     fetch_messages,
+    get_unconsolidated_stats,
+    fetch_unconsolidated_messages,
+    update_last_consolidated,
 )
 from app.models import (
     ChatRequest,
@@ -100,9 +103,30 @@ async def save_or_reconcile(
     return {"action": decision["action"], "change_id": str(change_id)}
 
 
+async def consolidate_and_save(conversation_id: UUID) -> None:
+    """Background task: extract facts rom unconsolidated messages via memory LLM,
+    reconcile + save each, then mark the batch as consolidated."""
+    if not database.pool:
+        return
+    
+    async with database.pool.acquire() as conn:
+        messages = await fetch_unconsolidated_messages(conn, conversation_id)
+        if not messages:
+            return
+        
+        batch = [{"role": m["role"], "content": m["content"]} for m in messages]
+        facts = await agent.consolidate_memories(batch)
+
+        for fact in facts:
+            embedding = await embeddings.get_provider().embed(fact)
+            await save_or_reconcile(conn, fact, embedding)
+
+        await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
+    background_tasks: BackgroundTasks,
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> ChatResponse:
     conversation_id = payload.conversation_id
@@ -136,12 +160,15 @@ async def chat(
             "assistant",
             assistant_message,
         )
-        # Extract durable facts from the user#s message and saves them automatically
-        extracted_facts = await agent.extract_memories(payload.message)
-        for fact in extracted_facts:
-            fact_embedding = await embeddings.get_provider().embed(fact)
-            
-            await save_or_reconcile(conn, fact, fact_embedding)
+        # consolidation trigger: fire background task if enough messages have accumulated
+        # Or the oldest unconsolidated message is stale.
+        count, age_min = await get_unconsolidated_stats(conn, conversation_id)
+        should_consolidate = (
+            count >= settings.consolidation_interval
+            or (count > 0 and age_min >= settings.consolidation_idle_minutes)
+        )
+        if should_consolidate:
+            background_tasks.add_task(consolidate_and_save, conversation_id)
 
     return ChatResponse(
         conversation_id=conversation_id,

@@ -139,3 +139,63 @@ async def fetch_messages(
         conversation_id,
     )
     return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+async def get_unconsolidated_stats(
+        conn: asyncpg.Connection, conversation_id: UUID 
+) -> tuple[int, float]:
+    """Return (count, oldest_age_minutes) of messages not yet consolidated for this conversation"""
+    row = await conn.fetchrow(
+        """
+        with last_consolidated as (
+            select m.created_at as ts
+            from conversations c
+            left join messages m on m.id = c.last_consolidated_message_id
+            where c.id = $1
+        )
+        select 
+            count(*) as cnt,
+            coalesce(extract(epoch from (now() - min(m.created_at))) / 60, 0) as age_min
+        from messages m, last_consolidated
+        where m.conversation_id = $1
+            and (last_consolidated.ts is null or m.created_at > last_consolidated.ts)
+        """,
+        conversation_id,
+    )
+    return int(row["cnt"]), float(row["age_min"])
+
+async def fetch_unconsolidated_messages(
+    conn: asyncpg.Connection, conversation_id: UUID
+) -> list[dict]:
+    """Return messages not yet consolidated for this conversation, oldest first."""
+    rows = await conn.fetch(
+        """
+        with last_consolidated as (
+            select m.created_at as ts
+            from conversations c
+            left join messages m on m.id = c.last_consolidated_message_id
+            where c.id = $1
+        )
+        select m.id, m.role, m.content
+        from messages m, last_consolidated
+        where m.conversation_id = $1
+          and (last_consolidated.ts is null or m.created_at > last_consolidated.ts)
+        order by m.created_at asc
+        """,
+        conversation_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def update_last_consolidated(
+    conn: asyncpg.Connection, conversation_id: UUID, message_id: UUID
+) -> None:
+    """Update the last_consolidated_message_id for a conversation."""
+    await conn.execute(
+        """
+        update conversations
+        set last_consolidated_message_id = $2
+        where id = $1
+        """,
+        conversation_id,
+        message_id,
+    )

@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     ollama_model: str = "llama3.2:3b"
     ollama_base_url: str = "http://localhost:11434"
+    memory_llm_model: str = "llama3.2:3b" #"qwen2.5:14b"
+    consolidation_interval: int = 20
+    consolidation_idle_minutes: int = 30
+
 
 
 

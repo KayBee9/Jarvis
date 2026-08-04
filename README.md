@@ -221,3 +221,8 @@ Steps in roughly the order they'll be done:
 - **Voice cloning (XTTS-v2 or F5-TTS)** — attempted on the `voice-cloning-xtts` branch, abandoned mid-experiment due to a dependency chain that doesn't work cleanly on our stack (Python 3.13 + PyTorch 2.12 + Windows). Chain of issues encountered, in order: `torchaudio` missing → `transformers.pytorch_utils.isin_mps_friendly` removed → `torchcodec` missing → FFmpeg missing → PyTorch/torchcodec version incompatibility. The `TTSProvider` abstraction in `app/voice.py` is ready to accept an `XTTSProvider` — the code shape is documented on the branch. Revisit options when picking this up again: (1) rebuild the venv with Python 3.11 and pinned older PyTorch (2.4-ish) to match torchcodec's compatibility matrix, (2) try [F5-TTS](https://github.com/SWivid/F5-TTS) instead — lighter dependency footprint, MIT license, similar zero-shot cloning, (3) wait for the `coqui-tts` Idiap fork to publish releases against newer torch.
 
 after() function??? for next.js
+
+
+- **Mobile rotation and scroll** — landscape orientation on iPhone doesn't relayout cleanly, and scroll inside the memories panel and chat message list sometimes gets stuck or scrolls the wrong container.
+- **Persona prompt iteration** — the `SYSTEM_PROMPT` in `agent.py` is v1 and needs a tuning pass based on real-usage annoyances (bad openers, unwanted disclaimers, tone).
+- **Cross-conversation history recall** — Jarvis only sees the current conversation, so "last week you told me about that project" doesn't work; fix candidates are injecting a summary of recent conversations into the system prompt on new chats, or treating all conversations as one long thread.
