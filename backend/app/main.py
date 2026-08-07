@@ -21,9 +21,10 @@ from app.db import (
     fetch_conversation,
     get_db,
     fetch_messages,
-    get_unconsolidated_stats,
+    get_unconsolidated_count,
     fetch_unconsolidated_messages,
     update_last_consolidated,
+    fetch_conversation_summary,
 )
 from app.models import (
     ChatRequest,
@@ -131,6 +132,54 @@ async def consolidate_and_save(conversation_id: UUID) -> None:
 
         await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
 
+async def finalize_when_idle(conversation_id: UUID) -> None:
+    """Wait 5 min. If nobody reconnect, consolidate any remaining messages
+    into memories and generate a summary. Both happen exactly once per
+    conversation - after this, the conversation is closed under the 5 min rule"""
+    await asyncio.sleep(300)
+
+    #Someone reconnected during the wait -abort.
+    if conversation_id in active_streams:
+        return
+    if not database.pool:
+        return
+
+    async with database.pool.acquire() as conn:
+        # Consolidation: catch any residual messages that never hit the 20 msg trigger
+        messages = await fetch_unconsolidated_messages(conn, conversation_id)
+        if messages:
+            batch = [{"role": m["role"], "content": m["content"]} for m in messages]
+            facts = await agent.consolidate_memories(batch)
+            for fact in facts:
+                embedding = await embeddings.get_provider().embed(fact)
+                await save_or_reconcile(conn, fact, embedding)
+            await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
+
+        #Immutable once summarized (5-min rule means no new messages can arrive)
+        existing = await conn.fetchval(
+            """select summary 
+            from conversations
+            where id = $1""",
+            conversation_id,
+        )
+        if existing:
+            return
+
+        full_history = await fetch_messages(conn, conversation_id)
+        if not full_history:
+            return
+
+        summary = await agent.summarize_conversation(full_history)
+        if not summary: 
+            return
+
+        await conn.execute(
+            "update conversations set summary = $1 where id =$2",
+            summary,
+            conversation_id,
+        )
+
+           
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -140,6 +189,7 @@ async def chat(
     conversation_id = payload.conversation_id
     history: list[dict[str, str]] = []
     relevant_memories: list[str] = []
+    previous_summaries: list[str] = []
 
     if conn:
         if not conversation_id:
@@ -152,6 +202,7 @@ async def chat(
         # see README "Smarter memory retrieval" for scaling strategies.
         memory_rows = await memories.list_memories_db(conn)
         relevant_memories = [m["content"] for m in memory_rows]
+        previous_summaries = await fetch_conversation_summary(conn, conversation_id)
     else:
         conversation_id = conversation_id or uuid4()
 
@@ -159,6 +210,7 @@ async def chat(
         payload.message,
         history=history,
         relevant_memories=relevant_memories,
+        previous_summaries=previous_summaries,
     )
 
     if conn:
@@ -170,12 +222,8 @@ async def chat(
         )
         # consolidation trigger: fire background task if enough messages have accumulated
         # Or the oldest unconsolidated message is stale.
-        count, age_min = await get_unconsolidated_stats(conn, conversation_id)
-        should_consolidate = (
-            count >= settings.consolidation_interval
-            or (count > 0 and age_min >= settings.consolidation_idle_minutes)
-        )
-        if should_consolidate:
+        count = await get_unconsolidated_count(conn, conversation_id)
+        if count > settings.consolidation_interval:
             background_tasks.add_task(consolidate_and_save, conversation_id)
 
     return ChatResponse(
@@ -202,14 +250,27 @@ async def get_latest_conversation(
 async def get_active_conversation(
     conn: asyncpg.Connection | None = Depends(get_db),
 ) -> Conversation | None:
-    """Return the currently-active conversation (any device connected via SSE), or None."""
     if not conn:
         raise HTTPException(status_code=503, detail="DATABASE_URL is not configured")
-    if not active_streams:
+
+    #1. If any device is currently connected via SSe, return tha conversation
+    if active_streams:
+        conv_id = next(iter(active_streams))
+        return await fetch_conversation(conn, conv_id)
+
+    # 2. Grace Period: if the most-recent conversation was updated in the last 5min,
+    # still count it as active so a reopen resumes it
+    row = await conn.fetchrow(
+        """
+        select id from conversations
+        where updated_at > now() - interval '5 minutes'
+        order by updated_at desc
+        limit 1
+        """
+    )
+    if not row:
         return None
-    # Pick any conversation with active subscribers — usually there's just one for a single-user app
-    conv_id = next(iter(active_streams))
-    return await fetch_conversation(conn, conv_id)
+    return await fetch_conversation(conn, row["id"])
 
 @app.get("/api/conversations/{conversation_id}/stream")
 async def stream_conversation(conversation_id: UUID):
@@ -246,12 +307,15 @@ async def stream_conversation(conversation_id: UUID):
                 # but forces a write, which fails and cancels the coroutine if the client
                 # has disconnected - that's what triggers the finally block.
                 yield ": keepalive\n\n"
-                
+
                 await asyncio.sleep(2)
         finally:
             active_streams[conversation_id] -= 1
             if active_streams[conversation_id] <= 0:
                 del active_streams[conversation_id]
+                #Schedule delayed summaization. If a device reconnects within 5 minutes
+                # the task will see it in active_streams and skip
+                asyncio.create_task(finalize_when_idle(conversation_id))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

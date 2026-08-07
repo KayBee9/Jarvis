@@ -140,7 +140,7 @@ async def fetch_messages(
     )
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
-async def get_unconsolidated_stats(
+async def get_unconsolidated_count(
         conn: asyncpg.Connection, conversation_id: UUID 
 ) -> tuple[int, float]:
     """Return (count, oldest_age_minutes) of messages not yet consolidated for this conversation"""
@@ -152,16 +152,14 @@ async def get_unconsolidated_stats(
             left join messages m on m.id = c.last_consolidated_message_id
             where c.id = $1
         )
-        select 
-            count(*) as cnt,
-            coalesce(extract(epoch from (now() - min(m.created_at))) / 60, 0) as age_min
+        select count(*) as cnt
         from messages m, last_consolidated
         where m.conversation_id = $1
             and (last_consolidated.ts is null or m.created_at > last_consolidated.ts)
         """,
         conversation_id,
     )
-    return int(row["cnt"]), float(row["age_min"])
+    return int(row["cnt"])
 
 async def fetch_unconsolidated_messages(
     conn: asyncpg.Connection, conversation_id: UUID
@@ -199,3 +197,30 @@ async def update_last_consolidated(
         conversation_id,
         message_id,
     )
+
+
+async def fetch_conversation_summary(
+    conn: asyncpg.Connection, current_conversation_id: UUID
+) -> list[str] | None:
+    """Return all summaries for a conversation EXCEPT the current one, newest first"""
+    if current_conversation_id is None:
+        # No current conversation, so return all summaries
+        rows = await conn.fetch(
+            """
+            select summary
+            from conversations
+            where summary is not null
+            order by updated_at desc
+            """,
+        )
+    else:
+        rows = await conn.fetch(
+            """
+            select summary
+            from conversations
+            where id != $1 and summary is not null
+            order by updated_at desc
+            """,
+            current_conversation_id,
+        )
+    return [row["summary"] for row in rows]

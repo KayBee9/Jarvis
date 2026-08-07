@@ -229,3 +229,8 @@ after() function??? for next.js
 
 - **Concurrent consolidation triggers** — `consolidate_and_save` runs as a `BackgroundTask` and takes several seconds (memory-LLM call). If a new chat turn arrives before it finishes, the fresh turn's `get_unconsolidated_stats` still sees the old pointer and fires a second consolidation task with an overlapping message batch. Result: same messages processed twice, duplicate memory saves. Fix candidates: (1) a per-conversation in-process `asyncio.Lock` around consolidation, (2) mark consolidation-in-progress on the conversation row so subsequent triggers skip until it clears, (3) advance `last_consolidated_message_id` optimistically at the start of the task rather than the end.
 - **Unbounded consolidation batch size** — `fetch_unconsolidated_messages` returns ALL messages after the last consolidated pointer. If the app is unused for a while and 100+ messages accumulate before the next trigger, the entire batch is sent to the memory LLM in one call, potentially exceeding context window. Fix: cap the batch at N messages (say 50), consolidate the oldest N first, advance the pointer, let the next chat turn's trigger pick up the rest.
+
+
+Memories will be automatically extracted after 20 messages or at the same time we make the summary of a conversation happen.
+
+Fix bug when server goes down for summary

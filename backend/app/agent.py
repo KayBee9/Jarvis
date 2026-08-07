@@ -167,12 +167,16 @@ async def generate_reply(
         message: str, 
         history: list[dict[str, str]],
         relevant_memories: list[str] | None = None,
+        previous_summaries: list[str] | None = None,
     ) -> str:
     """Build a system prompt with relevant memories, append the user message, call the LLM"""
     system_prompt = SYSTEM_PROMPT
     if relevant_memories:
         facts = "\n".join(f"- {mem}" for mem in relevant_memories)
         system_prompt += f"\n\nFacts you know about the user:\n{facts}"
+    if previous_summaries:
+        summaries = "\n".join(f"- {s}" for s in previous_summaries)
+        system_prompt += f"\n\nSummaries of past conversations:\n{summaries}"
 
     messages = [*history, {"role": "user", "content": message}]
     return await get_provider().generate(system_prompt=system_prompt, messages=messages)
@@ -277,3 +281,42 @@ async def consolidate_memories(messages_batch: list[dict[str, str]]) -> list[str
         return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
         return []
+
+SUMMARY_PROMPT = """
+You summarize a conversation between Oscar (user) and Jarvis (assistant) into 2-3 concise sentences.
+
+Rules:
+- Focus on TOPICS discussed and any decisions or outcomes reached — not on greetings or filler.
+- Third person. Refer to the user as "Oscar" and the assistant as "Jarvis".
+- Include specifics that would help resume context later: what was worked on, what conclusions were reached, any open threads.
+- 2-3 sentences maximum. No preamble, no closing, no bullets — just the paragraph.
+
+Example:
+"Oscar and Jarvis debugged a memory reconciliation bug where sibling facts (e.g. 'likes chocolate and meat') were dropped as duplicates. They traced it to overly aggressive similarity thresholds. Fix candidates were logged in the README for later."
+
+Return ONLY the summary paragraph, nothing else.
+""".strip()
+
+async def summarize_conversation(messages_batch: list[dict[str, str]]) -> str:
+    """Generates a 2-3 sentences summary of a conversation using the mmemory LLM.
+    Returns an empty string if the batch is empty or the LLM call fails."""
+
+    if not messages_batch:
+        return ""
+
+    formatted = "\n\n".join(
+        f"{'USER' if m['role'] == 'user' else 'JARVIS'}: {m['content']}"
+        for m in messages_batch
+    )
+
+    try:
+        response = await get_memory_provider().generate(
+            SUMMARY_PROMPT,
+            [{"role": "user", "content": formatted}],
+        )
+        return response.strip()
+    except Exception as error:
+        print(f"Error summarizing conversation: {error}")
+        return ""
+
+    
