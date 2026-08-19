@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     agent.init_provider()
     voice.init_tts()
     voice.init_stt()
+    asyncio.create_task(recover_pending_finalizations())
     yield
     await database.close()
 
@@ -132,11 +133,12 @@ async def consolidate_and_save(conversation_id: UUID) -> None:
 
         await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
 
-async def finalize_when_idle(conversation_id: UUID) -> None:
-    """Wait 5 min. If nobody reconnect, consolidate any remaining messages
-    into memories and generate a summary. Both happen exactly once per
-    conversation - after this, the conversation is closed under the 5 min rule"""
-    await asyncio.sleep(300)
+async def finalize_after(conversation_id: UUID, delay: float = 300) -> None:
+    """Wait 'delay' seconds, then consolidate and summarize if idle and needed.
+    Default delay is 5min (used by SSE disconnect). Startup recovery passes
+    a shorter delay if the conversation was already idle for while."""
+    if delay > 0:
+        await asyncio.sleep(delay)
 
     #Someone reconnected during the wait -abort.
     if conversation_id in active_streams:
@@ -174,12 +176,26 @@ async def finalize_when_idle(conversation_id: UUID) -> None:
             return
 
         await conn.execute(
-            "update conversations set summary = $1 where id =$2",
+            "update conversations set summary = $1 where id = $2",
             summary,
             conversation_id,
         )
 
-           
+async def recover_pending_finalizations() -> None:
+    """On startup, schedule finalization for any conversation left mid-air.
+    Delay = remaining time before the 5-min gate expires. If already past, delay=0."""
+    if not database.pool:
+        return
+    async with database.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "select id, updated_at from conversations where summary is null"
+        )
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        elapsed = (now - row["updated_at"]).total_seconds()
+        remaining = max(0, 300 - elapsed)
+        asyncio.create_task(finalize_after(row["id"], delay=remaining))
+       
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -315,7 +331,7 @@ async def stream_conversation(conversation_id: UUID):
                 del active_streams[conversation_id]
                 #Schedule delayed summaization. If a device reconnects within 5 minutes
                 # the task will see it in active_streams and skip
-                asyncio.create_task(finalize_when_idle(conversation_id))
+                asyncio.create_task(finalize_after(conversation_id))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
