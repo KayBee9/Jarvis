@@ -44,6 +44,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     agent.init_provider()
     voice.init_tts()
     voice.init_stt()
+    global startup_greeting
+    startup_greeting = await agent.warm_up_and_greet()
+    if startup_greeting:
+        print(f"[warmup] greeting ready: {startup_greeting}")
     asyncio.create_task(recover_pending_finalizations())
     yield
     await database.close()
@@ -246,6 +250,13 @@ async def chat(
         conversation_id=conversation_id,
         assistant_message=assistant_message,
     )
+
+@app.get("/api/greeting")
+async def get_greeting() -> dict[str, str]:
+    """Return the greeting generated at server startup.
+    Empty string if warmup failed or no greeting is pending."""
+    return {"greeting": startup_greeting}
+
 
 @app.get("/api/conversations/latest", response_model=Conversation | None)
 async def get_latest_conversation(

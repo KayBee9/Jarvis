@@ -319,4 +319,24 @@ async def summarize_conversation(messages_batch: list[dict[str, str]]) -> str:
         print(f"Error summarizing conversation: {error}")
         return ""
 
-    
+
+WARMUP_USER_TURN = (
+    "You've just come online for a new session. "
+    "Greet Oscar warmly in one short sentence — "
+    "something like 'Welcome back, Oscar' but in your own voice."
+    "no quotes, no formatting."
+)
+
+async def warm_up_and_greet() -> str:
+    """Fire a first request at the chat LLM so it loads into VRAM,
+    and return the greeting to show when Oscar next opens the app.
+    Returns an empty string on failure — startup continues either way."""
+    try:
+        response = await get_provider().generate(
+            SYSTEM_PROMPT,
+            [{"role": "user", "content": WARMUP_USER_TURN}],
+        )
+        return response.strip()
+    except Exception as error:
+        print(f"[warmup] failed: {error}")
+        return ""

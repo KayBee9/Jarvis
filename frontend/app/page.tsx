@@ -94,6 +94,10 @@ export default function Home() {
   // after the first play(), the element is trusted for the rest of the session
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // ref for pending greeting
+  const pendingGreetingRef = useRef<string | null>(null);
+
+
   useEffect(() => {
     const unlock = () => {
       if (audioRef.current) return;
@@ -103,6 +107,12 @@ export default function Home() {
         "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
       audio.play().catch(() => {});
       audioRef.current = audio;
+
+      // If a greeting was queued while audio was locked, speak it now
+      if (pendingGreetingRef.current) {
+        void SpeakText(pendingGreetingRef.current);
+        pendingGreetingRef.current = null;
+      }
     };
     document.addEventListener("touchstart", unlock, { once: true });
     document.addEventListener("mousedown", unlock, { once: true });
@@ -144,20 +154,43 @@ export default function Home() {
 
 
         // Tab-close case OR fresh install: check if any another device is active
-        const response = await fetch(`${apiBaseUrl}/api/conversations/active`);
-        if (!response.ok) return;
-        const data = await response.json();
-        if (!data) return; // null = no active devices, stay fresh
+        const activeResponse = await fetch(`${apiBaseUrl}/api/conversations/active`);
+        if (activeResponse.ok) {
+          const data = await activeResponse.json();
+          if (data) {
+            setConversationId(data.id);
+            const loaded: Message[] = data.messages.map(
+              (m: { id: string; role: string; content: string }) => ({
+                id: m.id,
+                role: m.role === "assistant" ? "jarvis" : "user",
+                content: m.content,
+              }),
+            );
+            setMessages(loaded);
+            return;
+          }
+        }
+        
+        // No conversation to resume - show the startup greeting if there is one
+        const greetingResponse = await fetch(`${apiBaseUrl}/api/greeting`);
+        if (!greetingResponse.ok) return;
+        const { greeting } = await greetingResponse.json();
+        if (!greeting) return;
 
-        setConversationId(data.id);
-        const loaded: Message[] = data.messages.map(
-          (m: { id: string; role: string; content: string }) => ({
-            id: m.id,
-            role: m.role === "assistant" ? "jarvis" : "user",
-            content: m.content,
-          }),
-        );
-        setMessages(loaded);
+        setMessages([
+          {
+            id: `greeting-${Date.now()}`,
+            role: "jarvis",
+            content: greeting,
+          },
+        ]);
+
+        // Speak the greeting: now if audio is unlocked, else queue for first gesture
+        if (audioRef.current) {
+          void SpeakText(greeting);
+        } else {
+          pendingGreetingRef.current = greeting;
+        }
       } catch (error) {
         console.error(error);
       }
