@@ -178,6 +178,7 @@ async def fetch_unconsolidated_messages(
         where m.conversation_id = $1
           and (last_consolidated.ts is null or m.created_at > last_consolidated.ts)
         order by m.created_at asc
+        limit 50
         """,
         conversation_id,
     )

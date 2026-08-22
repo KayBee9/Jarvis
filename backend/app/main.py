@@ -67,6 +67,8 @@ app.add_middleware(
 # Counts active SSE subscribers per conversation. When 0, the entry is removed.
 active_streams: defaultdict[UUID, int] = defaultdict(int)
 
+consolidation_locks: defaultdict[UUID, asyncio.Lock] = defaultdict(asyncio.Lock)
+
 @app.get("/health")
 async def health(
     conn: asyncpg.Connection | None = Depends(get_db),
@@ -122,20 +124,21 @@ async def consolidate_and_save(conversation_id: UUID) -> None:
     reconcile + save each, then mark the batch as consolidated."""
     if not database.pool:
         return
-    
-    async with database.pool.acquire() as conn:
-        messages = await fetch_unconsolidated_messages(conn, conversation_id)
-        if not messages:
-            return
-        
-        batch = [{"role": m["role"], "content": m["content"]} for m in messages]
-        facts = await agent.consolidate_memories(batch)
 
-        for fact in facts:
-            embedding = await embeddings.get_provider().embed(fact)
-            await save_or_reconcile(conn, fact, embedding)
+    async with consolidation_locks[conversation_id]:
+        async with database.pool.acquire() as conn:
+            messages = await fetch_unconsolidated_messages(conn, conversation_id)
+            if not messages:
+                return
+            
+            batch = [{"role": m["role"], "content": m["content"]} for m in messages]
+            facts = await agent.consolidate_memories(batch)
 
-        await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
+            for fact in facts:
+                embedding = await embeddings.get_provider().embed(fact)
+                await save_or_reconcile(conn, fact, embedding)
+
+            await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
 
 async def finalize_after(conversation_id: UUID, delay: float = 300) -> None:
     """Wait 'delay' seconds, then consolidate and summarize if idle and needed.
@@ -150,18 +153,23 @@ async def finalize_after(conversation_id: UUID, delay: float = 300) -> None:
     if not database.pool:
         return
 
-    async with database.pool.acquire() as conn:
-        # Consolidation: catch any residual messages that never hit the 20 msg trigger
-        messages = await fetch_unconsolidated_messages(conn, conversation_id)
-        if messages:
-            batch = [{"role": m["role"], "content": m["content"]} for m in messages]
-            facts = await agent.consolidate_memories(batch)
-            for fact in facts:
-                embedding = await embeddings.get_provider().embed(fact)
-                await save_or_reconcile(conn, fact, embedding)
-            await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
+    async with consolidation_locks[conversation_id]:
+        async with database.pool.acquire() as conn:
+            # Consolidation: catch any residual messages that never hit the 20 msg trigger.
+            # Loop because fetch is capped at 50 — a large backlog needs multiple passes.
+            while True:
+                messages = await fetch_unconsolidated_messages(conn, conversation_id)
+                if not messages:
+                    break
+                batch = [{"role": m["role"], "content": m["content"]} for m in messages]
+                facts = await agent.consolidate_memories(batch)
+                for fact in facts:
+                    embedding = await embeddings.get_provider().embed(fact)
+                    await save_or_reconcile(conn, fact, embedding)
+                await update_last_consolidated(conn, conversation_id, messages[-1]["id"])
 
-        #Immutable once summarized (5-min rule means no new messages can arrive)
+    # Summary doesn't need the consolidation lock — idempotent via `existing` check
+    async with database.pool.acquire() as conn:
         existing = await conn.fetchval(
             """select summary 
             from conversations
