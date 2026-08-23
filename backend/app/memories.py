@@ -8,6 +8,7 @@ async def create_memory_db(
     content: str,
     embedding: list[float] | None,
 ) -> UUID:
+    content = " ".join(content.split())
     row = await conn.fetchrow(
         """
         insert into memories (content, embedding)
@@ -69,6 +70,7 @@ async def update_memory_db(
         embedding: list[float] | None,
 ) -> bool:
     """Update a memory's content and embedding. Returns True if a row was updated."""
+    content = " ".join(content.split())
     result = await conn.execute(
         """
         update memories

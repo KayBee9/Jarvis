@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import asyncio
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -90,7 +91,7 @@ async def save_or_reconcile(
     """Reconcile a new fact against similar existing memories.
     Returns the action taken and the id of the new memory or pending change."""
     similar = await memories.search_memories(
-        conn, embedding, top_k=5, min_similarity=0.5
+        conn, embedding, top_k=5, min_similarity=0.82
     )
     decision = await agent.reconcile_memory(content, similar)
 
@@ -459,10 +460,27 @@ async def skip_memory_change(
     return {"detail": "Skipped"}
 
 
+_MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MARKDOWN_CHARS = re.compile(r"[*_~`#>]+")
+# Match "N-M" as a number range only when it's clearly standalone.
+# Lookbehind/ahead exclude digits and hyphens so 2024-08-22, COVID-19,
+# phone-like 555-1234, etc. are left alone.
+_NUMBER_RANGE = re.compile(r"(?<![\d-])(\d{1,3})-(\d{1,3})(?![\d-])")
+
+def strip_markdown_for_tts(text: str) -> str:
+    """Rewrite text so Piper reads it as words, not symbols.
+    Strips markdown formatting and rewrites simple number ranges."""
+    text = _MARKDOWN_LINK.sub(r"\1", text)          # [label](url) -> label
+    text = _MARKDOWN_CHARS.sub("", text)            # strip *, _, ~, `, #, >
+    text = _NUMBER_RANGE.sub(r"\1 to \2", text)     # 1-4 -> "1 to 4"
+    return text
+
+
 @app.post("/api/speak")
 async def speak(payload: SpeakRequest) -> Response:
     provider = voice.get_tts()
-    audio_bytes = await provider.synthesize(payload.text)
+    clean_text = strip_markdown_for_tts(payload.text)
+    audio_bytes = await provider.synthesize(clean_text)
     return Response(content=audio_bytes, media_type="audio/wav")
 
 

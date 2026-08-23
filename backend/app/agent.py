@@ -19,64 +19,16 @@ Hard rules — never break these:
   say "Nothing yet — you haven't shared anything I've saved."
 - If you don't know something, say so. Don't guess and don't fill silence.
 
+Voice:
+- You ARE Jarvis. Speak in the first person. Use "I", never "Jarvis" to refer to yourself.
+- Never narrate about yourself as an outside observer (no "Jarvis thinks...", no "Jarvis will now...").
+- Never break the fourth wall or comment on your own behavior (no "I'll respond as Jarvis from now on", no "as an AI I...", no meta-commentary about the conversation).
+- The user is Oscar. Address him as "you". Only use his name when it's natural (greeting, direct address).
+
 Style:
 - Concise and direct. Skip pleasantries unless the user opens with one.
 - Match the user's tone — formal if they're formal, casual if they're casual.
 - One sentence is often enough. Don't pad answers to feel helpful.
-""".strip()
-
-
-EXTRACTION_PROMPT = """
-You are a fact extractor.
-
-Look at the user message below. Identify any DURABLE facts the user has stated
-about themselves — things that will still be true tomorrow.
-
-Categories that count:
-- Preferences (food, music, work style, hobbies)
-- Biographical details (name, age, location, job, education)
-- Relationships (family, friends, pets, partners)
-- Ongoing goals or situations (a project they're working on, a habit they have)
-
-Categories that do NOT count:
-- One-time events ("I went to the store today")
-- Questions or requests ("Can you help me with X?")
-- Opinions about the conversation itself
-- Facts about other people (only the user)
-
-Rules:
-- Only extract facts the user has STATED about themselves
-- Do not infer, guess, or fill in gaps
-- Phrase each fact concisely in third person and start with the user's name, which is Oscar. An example would be "Oscar prefers tea over coffee"
-- If no qualifying facts are present, return an empty array
-
-Return ONLY valid JSON in this exact shape:
-{"facts": ["fact 1", "fact 2"]}
-""".strip()
-
-CONSOLIDATION_PROMPT = """
-You analyze a batch of conversation messages and extract every durable fact the user has stated about themselves.
-
-CRITICAL RULES:
-- Extract each fact as a SEPARATE entry in the JSON array. NEVER combine multiple facts into one string.
-- Phrase each fact concisely in third person: "Oscar prefers tea over coffee"
-- Only extract facts the user has STATED — never infer, guess, or fill in gaps.
-
-Examples of atomic splitting:
-- "I like chocolate and meat"
-  → ["Oscar likes chocolate", "Oscar likes meat"]
-- "I moved to Paris last week and my dog Rex is 3 years old"
-  → ["Oscar lives in Paris", "Oscar has a dog named Rex", "Rex is 3 years old"]
-- "I'm not vegetarian anymore"
-  → ["Oscar is not vegetarian"]
-- "How's the weather? Also can you remind me tomorrow?"
-  → []
-
-Categories that count: preferences, biographical details, relationships, ongoing goals or situations.
-Categories that do NOT count: one-time events, questions, requests, opinions about the conversation itself.
-
-Return ONLY valid JSON in this exact shape:
-{"facts": ["fact 1", "fact 2"]}
 """.strip()
 
 
@@ -183,6 +135,34 @@ async def generate_reply(
 
 import re
 
+EXTRACTION_PROMPT = """
+You are a fact extractor.
+
+Look at the user message below. Identify any DURABLE facts the user has stated
+about themselves — things that will still be true tomorrow.
+
+Categories that count:
+- Preferences (food, music, work style, hobbies)
+- Biographical details (name, age, location, job, education)
+- Relationships (family, friends, pets, partners)
+- Ongoing goals or situations (a project they're working on, a habit they have)
+
+Categories that do NOT count:
+- One-time events ("I went to the store today")
+- Questions or requests ("Can you help me with X?")
+- Opinions about the conversation itself
+- Facts about other people (only the user)
+
+Rules:
+- Only extract facts the user has STATED about themselves
+- Do not infer, guess, or fill in gaps
+- Phrase each fact concisely in third person and start with the user's name, which is Oscar. An example would be "Oscar prefers tea over coffee"
+- If no qualifying facts are present, return an empty array
+
+Return ONLY valid JSON in this exact shape:
+{"facts": ["fact 1", "fact 2"]}
+""".strip()
+
 async def extract_memories(message: str) -> list[str]:
     """Run a second LLM call to find durable facts about use"""
     try: 
@@ -204,13 +184,42 @@ async def extract_memories(message: str) -> list[str]:
         return []
     
 RECONCILE_PROMPT = """
-You decide how to handle a newly-learned fact about the user, in light of similar facts already stored.
+You decide how to handle a newly-learned fact about the user, given similar
+facts already stored.
 
-Choose ONE action:
-- ADD: the new fact is independent of all existing facts (no conflict, just adjacent topic).
-- REPLACE: the new fact directly updates an existing fact (user moved, changed jobs, updated a preference). Pick which existing fact it replaces.
-- DELETE: the new fact negates an existing fact ("I no longer have X", "I'm not X anymore"). Pick which existing fact to delete.
-- SKIP: the new fact is already represented by an existing one.
+Choose exactly ONE action:
+
+- ADD: the new fact concerns a DIFFERENT specific subject than every existing
+  fact. Topical overlap does not count — two preferences about different foods,
+  two hobbies with different activities, two different locations at different
+  times all get ADD.
+
+- REPLACE: the new fact is about the SAME specific subject as an existing fact
+  but updates the value (moved, changed jobs, updated preference). Pick which
+  existing fact it replaces.
+
+- DELETE: the new fact NEGATES an existing fact ("I no longer X", "I'm not X
+  anymore", "I stopped Xing"). Pick which existing fact to delete.
+
+- SKIP: the new fact literally restates or paraphrases an existing fact — same
+  subject, same predicate, same value. Only use SKIP when the two facts convey
+  the exact same information.
+
+Examples:
+- NEW: "Oscar likes chocolate" / EXISTING: ["Oscar likes meat"]
+  → ADD  (different foods, both are preferences but not the same fact)
+- NEW: "Oscar plays piano" / EXISTING: ["Oscar plays guitar"]
+  → ADD  (different instruments)
+- NEW: "Oscar prefers coffee" / EXISTING: ["Oscar likes coffee"]
+  → SKIP  (same fact, paraphrased)
+- NEW: "Oscar lives in Berlin" / EXISTING: ["Oscar lives in Paris"]
+  → REPLACE  (same subject: residence; new value overwrites old)
+- NEW: "Oscar no longer smokes" / EXISTING: ["Oscar smokes"]
+  → DELETE  (negation of the same fact)
+- NEW: "Oscar's favorite pie flavor is apple" / EXISTING: ["Oscar likes pies"]
+  → ADD  (specific attribute is a distinct fact from the general preference)
+- NEW: "Oscar works as a software engineer" / EXISTING: ["Oscar works in tech"]
+  → ADD  (more specific job title is a distinct fact from the general industry)
 
 Return ONLY valid JSON in this exact shape:
 {"action": "ADD" | "REPLACE" | "DELETE" | "SKIP", "target_id": "uuid string or null"}
@@ -252,10 +261,43 @@ async def reconcile_memory(
         target_id = data.get("target_id")
         if action in ("REPLACE", "DELETE") and not target_id:
             return {"action": "ADD", "target_id": None}
+        print(f"[reconcile] {action} for '{new_fact}' vs {[m['content'] for m in similar_memories]}")
         return {"action": action, "target_id": target_id}
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
         return {"action": "ADD", "target_id": None}
     
+CONSOLIDATION_PROMPT = """
+You analyze a batch of conversation messages and extract every durable fact the user has stated about themselves.
+
+CRITICAL RULES:
+- Extract each fact as a SEPARATE entry in the JSON array. NEVER combine multiple facts into one string.
+- Phrase each fact concisely in third person: "Oscar prefers tea over coffee"
+- Only extract facts the user has STATED — never infer, guess, or fill in gaps.
+
+Examples of atomic splitting:
+- "I like chocolate and meat"
+  → ["Oscar likes chocolate", "Oscar likes meat"]
+- "I moved to Paris last week and my dog Rex is 3 years old"
+  → ["Oscar lives in Paris", "Oscar has a dog named Rex", "Rex is 3 years old"]
+- "I'm not vegetarian anymore"
+  → ["Oscar is not vegetarian"]
+- "How's the weather? Also can you remind me tomorrow?"
+  → []
+
+Categories that count: preferences, biographical details, relationships, ongoing goals or situations.
+Categories that do NOT count: one-time events, questions, requests, opinions about the conversation itself.
+
+Do NOT extract meta-statements about the current interaction:
+- "Oscar is talking to Jarvis" — meta about the conversation, not a durable trait
+- "Oscar wants to discuss X" — a transient intent, not a durable fact
+- "Oscar asked about smart homes" — a question, not a fact
+- "Oscar is seeking assistance" — a description of the interaction, not a fact
+- "Oscar admitted being wrong" / "Oscar acknowledged X" / "Oscar said X" — describes what happened in the chat, not a durable trait about him
+
+Return ONLY valid JSON in this exact shape:
+{"facts": ["fact 1", "fact 2"]}
+""".strip()
+
 
 async def consolidate_memories(messages_batch: list[dict[str, str]]) -> list[str]:
     """Batch-extact durable facts from a slice of conversation using the memory LLM"""
@@ -283,16 +325,21 @@ async def consolidate_memories(messages_batch: list[dict[str, str]]) -> list[str
         return []
 
 SUMMARY_PROMPT = """
-You summarize a conversation between Oscar (user) and Jarvis (assistant) into 2-3 concise sentences.
+You summarize a past conversation into 2-3 concise sentences that Jarvis can
+read later to remember what was covered.
 
 Rules:
-- Focus on TOPICS discussed and any decisions or outcomes reached — not on greetings or filler.
-- Third person. Refer to the user as "Oscar" and the assistant as "Jarvis".
-- Include specifics that would help resume context later: what was worked on, what conclusions were reached, any open threads.
+- Topic-focused. Describe WHAT was worked on, decisions reached, and open threads.
+- Do NOT narrate about "Oscar" or "Jarvis" as characters. Do NOT use their names as sentence subjects.
+- Neutral voice — no first-person, no third-person storytelling. Prefer noun phrases and passive constructions.
+- Include concrete specifics that would help resume context later.
 - 2-3 sentences maximum. No preamble, no closing, no bullets — just the paragraph.
 
-Example:
-"Oscar and Jarvis debugged a memory reconciliation bug where sibling facts (e.g. 'likes chocolate and meat') were dropped as duplicates. They traced it to overly aggressive similarity thresholds. Fix candidates were logged in the README for later."
+Good example:
+"Debugged a memory reconciliation bug where sibling facts (e.g. 'likes chocolate and meat') were dropped as duplicates. Traced to overly aggressive similarity thresholds. Fix candidates logged in the README for later."
+
+Bad example (do NOT do this):
+"Oscar and Jarvis debugged a memory reconciliation bug. They decided..."
 
 Return ONLY the summary paragraph, nothing else.
 """.strip()
