@@ -6,6 +6,8 @@ from ollama import AsyncClient as OllamaClient
 
 from app.config import get_settings
 
+from typing import AsyncIterator
+
 SYSTEM_PROMPT = """
 You are Jarvis, a personal assistant for one specific user named Oscar.
 
@@ -41,6 +43,12 @@ class LLMProvider(Protocol):
         messages: list[dict[str, str]], 
     ) -> str: ...
 
+    async def stream(
+        self,
+        system_prompt:str,
+        messages: list[dict[str, str]],
+    ) -> AsyncIterator[str]: ...
+
 class OllamaProvider:
     """Local LLM via Ollama's HTTP API"""
 
@@ -61,6 +69,21 @@ class OllamaProvider:
             ],
         )
         return response["message"]["content"]
+
+    async def stream(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, str]],
+    ) -> AsyncIterator[str]:
+        async for chunck in await self._client.chat(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *messages,
+            ],
+            stream=True,
+        ):
+            yield chunck["message"]["content"]
     
 class AnthropicProvider:
     """Cloud LLM via Anthropic's Claude API."""
@@ -131,7 +154,41 @@ async def generate_reply(
         system_prompt += f"\n\nSummaries of past conversations:\n{summaries}"
 
     messages = [*history, {"role": "user", "content": message}]
+    messages = merge_consecutive_user_turns(messages)
+    print(f"[generate_reply] {[(m['role'], m['content'][:60]) for m in messages]}")
     return await get_provider().generate(system_prompt=system_prompt, messages=messages)
+
+async def stream_reply(
+        message: str,
+        history: list[dict[str, str]],
+        relevant_memories: list[str] | None = None,
+        previous_summaries: list[str] | None = None,
+) -> AsyncIterator[str]:
+    """Build a system prompt with relevant memories, append the user message,
+    call the LLM"""
+    system_prompt = SYSTEM_PROMPT
+    if relevant_memories:
+        facts = "\n".join(f"- {mem}" for mem in relevant_memories)
+        system_prompt += f"\n\nFacts you know about the user:\n{facts}"
+    if previous_summaries:
+        summaries = "\n".join(f"- {s}" for s in previous_summaries)
+        system_prompt += f"\n\nSummaries of past conversations:\n{summaries}"
+
+    messages = [*history, {"role": "user", "content": message}]
+    messages = merge_consecutive_user_turns(messages)
+    async for token in get_provider().stream(system_prompt=system_prompt, messages=messages):
+        yield token
+
+def merge_consecutive_user_turns(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Collapse consecutive user turns into one composite message.
+    Prevents small models from ignoring earlier user turns after an interruption."""
+    result = []
+    for msg in messages:
+        if result and result[-1]["role"] == "user" and msg["role"] == "user":
+            result[-1]["content"] += "\n\n" + msg["content"]
+        else:
+            result.append(dict(msg))
+    return result
 
 import re
 

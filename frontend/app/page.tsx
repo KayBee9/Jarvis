@@ -48,6 +48,15 @@ export default function Home() {
   // Conversation ID returned by the backend on the first message, reused on every subsequent message for context
   const [conversationId, setConversationId] = useState<string | null>(null);
 
+  const conversationIdRef = useRef<string | null>(null);
+
+  // True while a chat request is in-flight (backend still generating a reply).
+  // Flips back to false as soon as the response arrives, BEFORE TTS starts.
+  // A new Send while this is true interrupts the in-flight request.
+  const [isGenerating, setIsGenerating] = useState(false);
+  // AbortController for the current in-flight fetch, so a new Send can cancel it.
+  const abortRef = useRef<AbortController | null>(null);
+
   // ID of the memory are successfully saved
   const [savedMemoryId, setSavedMemoryId] = useState<Set<string>>(new Set());
   // ID of the memory that is currently being saved
@@ -126,6 +135,10 @@ export default function Home() {
   useEffect(() => {
   messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   // On mount, chack if any device is currently active. If so, join the convo
   useEffect(() => {
@@ -248,6 +261,18 @@ export default function Home() {
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    // Interrupt: only if Jarvis is still generating (not once the reply arrived).
+    // Kills the in-flight fetch — the interrupted user message stays in DB with
+    // no assistant reply, and gets picked up as history on the next turn.
+    if (isGenerating && abortRef.current) {
+      abortRef.current.abort();
+    }
+    // Always stop any playing audio — fresh message, fresh voice.
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+
     const userMessage: Message = {
       id: generateId(),
       role: "user",
@@ -256,30 +281,60 @@ export default function Home() {
     setMessages((current) => [...current, userMessage]);
     setInput("");
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsGenerating(true);
+
+    if (!conversationIdRef.current) {
+      conversationIdRef.current = conversationId ?? generateId();
+      setConversationId(conversationIdRef.current);
+    }
+    const currentConvId = conversationIdRef.current;
+
+    let jarvisId: string | null = null;
     try {
       const response = await fetch(`${apiBaseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           message: userMessage.content,
-          conversation_id: conversationId,
+          conversation_id: currentConvId,
         }),
+        signal: controller.signal,
       });
       if (!response.ok) throw new Error(`Chat request failed with ${response.status}`);
-      const data = await response.json();
-      // React automatically sets the ID only once if it's always the same
-      setConversationId(data.conversation_id);
+      
+      const convId = response.headers.get("X-Conversation-Id");
+      if (convId) {
+        conversationIdRef.current = convId;
+        setConversationId(convId);
+      }
 
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      jarvisId = generateId();
+      setMessages(current => [...current, { id: jarvisId!, role: "jarvis", content: "" }]);
+      let full = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        setMessages(current =>
+          current.map(m => m.id === jarvisId ? { ...m, content: m.content + chunk } : m)
+        );
+        full += chunk;
+      }
+      if (full) void SpeakText(full);
 
-      const jarvisMessage: Message = {
-        id: generateId(),
-        role: "jarvis",
-        content: data.assistant_message,
-      };
-      setMessages((current) => [...current, jarvisMessage]);
-      void SpeakText(data.assistant_message);
     } catch (error) {
+      // Aborted requests aren't errors — the user chose to interrupt.
+      if (error instanceof DOMException && error.name === "AbortError") {
+        if (jarvisId) setMessages(current => current.filter(m => m.id !== jarvisId));
+        return;
+      }
       console.error(error);
+    } finally {
+      setIsGenerating(false);
     }
   }
 
@@ -402,6 +457,11 @@ export default function Home() {
 
   // Function to start recording audio from the user's microphone
   async function startRecording() {
+    // Kill any Jarvis audio the moment the user reaches for the mic
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);

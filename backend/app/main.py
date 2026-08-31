@@ -63,12 +63,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Conversation-Id"],
 )
 
 # Counts active SSE subscribers per conversation. When 0, the entry is removed.
 active_streams: defaultdict[UUID, int] = defaultdict(int)
 
 consolidation_locks: defaultdict[UUID, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+reconcile_lock: asyncio.Lock = asyncio.Lock()
+
+pending_consolidations: dict[UUID, asyncio.Task] = {}
 
 @app.get("/health")
 async def health(
@@ -90,34 +95,35 @@ async def save_or_reconcile(
 ) -> dict[str, str]:
     """Reconcile a new fact against similar existing memories.
     Returns the action taken and the id of the new memory or pending change."""
-    similar = await memories.search_memories(
-        conn, embedding, top_k=5, min_similarity=0.82
-    )
-    decision = await agent.reconcile_memory(content, similar)
+    async with reconcile_lock:
+        similar = await memories.search_memories(
+            conn, embedding, top_k=5, min_similarity=0.82
+        )
+        decision = await agent.reconcile_memory(content, similar)
 
-    if decision["action"] == "ADD":
-        memory_id = await memories.create_memory_db(conn, content, embedding)
-        return {"action": "ADD", "memory_id": str(memory_id)}
-    if decision["action"] == "SKIP":
-        return {"action": "SKIP"}
-    
-    # REPLACE or DELETE - look up the target, saved as pending change
-    target = next(
-        (m for m in similar if str(m["id"]) == decision["target_id"]),
-        None,
-    )
-    if target is None:
-        memory_id = await memories.create_memory_db(conn, content, embedding)
-        return {"action": "ADD", "memory_id": str(memory_id)}
+        if decision["action"] == "ADD":
+            memory_id = await memories.create_memory_db(conn, content, embedding)
+            return {"action": "ADD", "memory_id": str(memory_id)}
+        if decision["action"] == "SKIP":
+            return {"action": "SKIP"}
+        
+        # REPLACE or DELETE - look up the target, saved as pending change
+        target = next(
+            (m for m in similar if str(m["id"]) == decision["target_id"]),
+            None,
+        )
+        if target is None:
+            memory_id = await memories.create_memory_db(conn, content, embedding)
+            return {"action": "ADD", "memory_id": str(memory_id)}
 
-    change_id = await memories.create_pending_change(
-        conn,
-        action=decision["action"],
-        target_memory_id=UUID(decision["target_id"]),
-        target_content=target["content"],
-        proposed_content=content if decision["action"] == "REPLACE" else None,
-    )
-    return {"action": decision["action"], "change_id": str(change_id)}
+        change_id = await memories.create_pending_change(
+            conn,
+            action=decision["action"],
+            target_memory_id=UUID(decision["target_id"]),
+            target_content=target["content"],
+            proposed_content=content if decision["action"] == "REPLACE" else None,
+        )
+        return {"action": decision["action"], "change_id": str(change_id)}
 
 
 async def consolidate_and_save(conversation_id: UUID) -> None:
@@ -208,13 +214,34 @@ async def recover_pending_finalizations() -> None:
         elapsed = (now - row["updated_at"]).total_seconds()
         remaining = max(0, 300 - elapsed)
         asyncio.create_task(finalize_after(row["id"], delay=remaining))
+
+def schedule_consolidation(conversation_id: UUID, delay: float = 10) -> None:
+    """Schedule consolidation for `delay` seconds from now. If another trigger
+    arrives before then, the pending task is cancelled and rescheduled."""
+    existing = pending_consolidations.get(conversation_id)
+    if existing and not existing.done():
+        existing.cancel()
+
+    async def wait_and_run() -> None:
+        try:
+            await asyncio.sleep(delay)
+            print(f"[debounce] consolidation firing for {conversation_id}")
+            await consolidate_and_save(conversation_id)
+        except asyncio.CancelledError:
+            pass # Rescheduled by a fresh trigger
+        finally:
+            # Only pop if we're still the current pending task
+            if pending_consolidations.get(conversation_id) is task:
+                pending_consolidations.pop(conversation_id, None)
+
+    task = asyncio.create_task(wait_and_run())
+    pending_consolidations[conversation_id] = task
        
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat")
 async def chat(
     payload: ChatRequest,
-    background_tasks: BackgroundTasks,
     conn: asyncpg.Connection | None = Depends(get_db),
-) -> ChatResponse:
+) -> StreamingResponse:
     conversation_id = payload.conversation_id
     history: list[dict[str, str]] = []
     relevant_memories: list[str] = []
@@ -223,6 +250,8 @@ async def chat(
     if conn:
         if not conversation_id:
             conversation_id = await create_conversation(conn)
+        elif not await conn.fetchval("select 1 from conversations where id = $1", conversation_id):
+            await conn.execute("insert into conversations (id) values ($1)", conversation_id)
         # Fetch history BEFORE adding the new user message,
         # so the LLM doesn't see the new message as part of the history
         history = await fetch_messages(conn, conversation_id)
@@ -235,29 +264,33 @@ async def chat(
     else:
         conversation_id = conversation_id or uuid4()
 
-    assistant_message = await agent.generate_reply(
-        payload.message,
-        history=history,
-        relevant_memories=relevant_memories,
-        previous_summaries=previous_summaries,
-    )
+    async def event_stream() -> AsyncIterator[str]:
+        full = ""
+        try:
+            async for token in agent.stream_reply(
+                payload.message,
+                history=history,
+                relevant_memories=relevant_memories,
+                previous_summaries=previous_summaries,
+            ):
+                full += token
+                yield token
+        except asyncio.CancelledError:
+            # Client aborted - don't save partial. Msg1 stays unanswered in DB
+            raise
+        else:
+            # Reply completed normally - save it and fire consolidation.
+            if full and database.pool:
+                async with database.pool.acquire() as inner_conn:
+                    await add_message(inner_conn, conversation_id, "assistant", full)
+                    count = await get_unconsolidated_count(inner_conn, conversation_id)
+                    if count > settings.consolidation_interval:
+                        schedule_consolidation(conversation_id)
 
-    if conn:
-        await add_message(
-            conn,
-            conversation_id,
-            "assistant",
-            assistant_message,
-        )
-        # consolidation trigger: fire background task if enough messages have accumulated
-        # Or the oldest unconsolidated message is stale.
-        count = await get_unconsolidated_count(conn, conversation_id)
-        if count > settings.consolidation_interval:
-            background_tasks.add_task(consolidate_and_save, conversation_id)
-
-    return ChatResponse(
-        conversation_id=conversation_id,
-        assistant_message=assistant_message,
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/plain",
+        headers={"X-Conversation-Id": str(conversation_id)},
     )
 
 @app.get("/api/greeting")
