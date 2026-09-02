@@ -1,218 +1,211 @@
 # Jarvis
 
-A personal AI assistant — built for one user (me). The goal is a private, locally-runnable assistant that can chat, remember facts I share, talk back, and eventually learn to behave like me.
+> A local-first, voice-driven personal AI assistant that remembers you across devices.
 
-## Direction
+I built Jarvis because commercial assistants have three shortcomings I couldn't work around: they don't remember what you told them last week, they live in someone else's cloud, and they can't be reshaped to match your voice or judgment. Jarvis is my attempt to fix all three. It runs from a single machine on my Tailscale tailnet, is reachable from any device I own, and keeps a persistent semantic memory of facts I've shared.
 
-- **Single-user, no auth.** Multi-user scaffolding (JWT verification, `user_id` filtering, row-level security) is being removed.
-- **Local-first AI.** Currently uses Anthropic Claude; transitioning to a local LLM via Ollama (Llama 3.1 8B as the starting point) so chat works offline and stays private.
-- **Multi-device access.** Will eventually be reachable from laptop, phone, desktop, and ultimately a dedicated device.
-- **Personalization.** A strong persona prompt + the existing semantic memory layer first. LoRA fine-tuning on samples of my own writing later.
+The project has become a testbed for a set of engineering problems I find interesting: cross-device state consistency without a coordination server, streaming LLM responses with mid-flight cancellation, and turning conversational chat into a durable knowledge base that the assistant can reason over.
 
-The previous version (multi-user-capable, Claude-only) is preserved on the `multi-user-snapshot` branch.
+## Highlights
 
-## Session Handoff
+- **Cross-device continuity** — start a conversation on desktop, keep it going on phone. Both devices see live updates via Server-Sent Events, and a five-minute idle rule closes and summarizes a session automatically.
+- **Streaming replies with mid-flight interrupts** — send follow-up messages while Jarvis is still generating; the next reply naturally addresses everything he hasn't answered yet. No queue-and-wait UX, no lost context.
+- **LLM-driven memory reconciliation** — the assistant classifies each new fact against similar existing memories as `ADD`, `REPLACE`, `DELETE`, or `SKIP`, and destructive actions surface as pending changes for user approval.
+- **Batched fact extraction** — memory extraction runs on windows of conversation rather than per-message, giving the extractor context to distinguish durable traits from transient intent, and running many fewer LLM calls than a naive approach.
+- **Voice pipeline with barge-in** — tap the mic while Jarvis is speaking and audio stops immediately. Browser-side VAD auto-ends the recording when you finish talking. iOS Safari autoplay is worked around with a silent-WAV unlock on first tap.
+- **Runs entirely on your machine** — local LLM via Ollama, local embeddings via `sentence-transformers`, local Piper TTS, local Whisper STT. The only remote component today is the Postgres backing store, and swapping to local Postgres is a config change.
 
-**For any AI assistant (or future me) continuing this project — read this first to pick up where we left off.** Keep this section updated at the end of each session.
+## Architecture
 
-- **Current step in the Roadmap:** Step 5 (LoRA fine-tuning) is next. Steps 1-4 complete.
-- **Working style:** Step-by-step teaching. Explain each change; don't dump full solutions in one go. Wait for confirmation before moving to the next sub-step. Ask before big design commits.
-- **Recently added (last session):**
-  - Step 4 done: LAN + remote access via Tailscale with real Let's Encrypt HTTPS certs. Backend + frontend both serve HTTPS from the same cert (`backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.{crt,key}`, gitignored).
-  - `backend/start.ps1` script bakes the SSL flags into the uvicorn command; frontend's `package.json` dev script bakes the `--experimental-https` flags.
-  - iOS Safari audio autoplay unlock: silent-WAV played on first touch/mousedown, persistent `audioRef` reused for all subsequent TTS playback.
-  - `crypto.randomUUID()` replaced with a `generateId()` polyfill using `crypto.getRandomValues()` since `randomUUID` requires a secure context we don't always have (LAN HTTP was a stepping stone).
-  - Mobile polish: `viewport` export with `viewportFit: "cover"`, `h-[100dvh]` on html/body, `text-base` on the chat textarea (prevents iOS auto-zoom), safe-area padding at the bottom of the chat column.
-- **Design choices worth respecting (don't undo without discussing):**
-  - Memory injection = "inject-all" while the memory set is small. See "Smarter memory retrieval" for the scaling escape hatch.
-  - No approval step for ADD / SKIP actions — only REPLACE / DELETE need approval.
-  - Both auto-extract and manual-save go through the shared `save_or_reconcile` helper in `main.py`.
-  - Regex-based JSON parsing for `extract_memories` / `reconcile_memory` — fragile but works. Upgrade to Ollama's `format="json"` if it starts failing more often.
-  - Certs live in `backend/certs/` and are shared with the frontend via relative path (`../backend/certs/...` in `package.json`). Both servers serve HTTPS with the same Tailscale-provisioned cert.
-  - All URLs use the MagicDNS hostname (`desktop-k5pi7kg.tail5ce535.ts.net`) not IPs — the cert is only valid for the hostname.
-- **Known open bugs (documented in "Known Gaps"):**
-  - Reconciler drops sibling facts as duplicates (e.g. "I like chocolate and meat" saves only one). Quickest fix to try: raise `min_similarity` in `save_or_reconcile` (main.py) from 0.5 to 0.75.
-- **Immediate next action:** Start step 5 (LoRA fine-tuning). Sub-tasks that need scoping: (1) collect a personal dataset — sources could be exported chats, journal entries, emails, this Jarvis conversation history itself. (2) Format for training (Alpaca-style, ShareGPT, or chat template — depends on tooling). (3) Pick training tool (Unsloth is fastest on modest hardware; Axolotl is more flexible; MLX-LM if on Mac). (4) Rent a GPU or run locally if the user has one. (5) Convert LoRA to GGUF and load into Ollama with `Modelfile`.
-- **Blockers / open questions for step 5:** Does the user have GPU access, or need to rent? What sources of "your writing" are willing/available to use as training data? What size base model to fine-tune (`llama3.1:8b` matches current runtime)?
-
-## Stack
+```
+                     ┌──────────────────────┐
+                     │  Browser (any device)│
+                     │  Next.js + Tailwind  │
+                     └──────────┬───────────┘
+                                │ HTTPS (Tailscale cert)
+                                ▼
+   ┌────────────────────────────────────────────────────────┐
+   │                     FastAPI backend                    │
+   │                                                        │
+   │  ┌────────────┐  ┌────────────┐  ┌──────────────────┐  │
+   │  │ /api/chat  │  │ /api/speak │  │  /api/memories/* │  │
+   │  │(streaming) │  │  (Piper)   │  │                  │  │
+   │  └─────┬──────┘  └────────────┘  └────────┬─────────┘  │
+   │        │                                  │            │
+   │        │       ┌────────────────┐         │            │
+   │        └──────▶│  Agent layer   │◀────────┘            │
+   │                │  (Ollama /     │                      │
+   │                │   Anthropic)   │                      │
+   │                └────────┬───────┘                      │
+   │                         │                              │
+   │  ┌──────────────────────┴─────────────────────────┐    │
+   │  │           Async background workers             │    │
+   │  │  consolidation (debounced) • finalize_after    │    │
+   │  │  reconciliation lock • startup recovery        │    │
+   │  └──────────────────────┬─────────────────────────┘    │
+   └─────────────────────────┼──────────────────────────────┘
+                             ▼
+                  ┌─────────────────────┐
+                  │  Postgres + pgvector│
+                  │  conversations,     │
+                  │  messages, memories,│
+                  │  pending_changes    │
+                  └─────────────────────┘
+```
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Frontend | Next.js, React, Tailwind | Dark, minimal, browser-only |
-| Backend | FastAPI | Async, single-process |
-| Database | Supabase Postgres + pgvector | Local Postgres possible later |
-| LLM | Anthropic Claude (today) → Ollama local LLM (next) | Swappable via a provider abstraction in `agent.py` |
-| Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) | Local, 384-dim, free |
-| STT | `faster-whisper` (base model) | Local, runs on CPU |
-| TTS | Piper (`en_US-amy-medium`) | Local, runs on CPU |
-| Voice activity | Browser-side VAD via `AudioContext` | Pure JS, offline |
+| Frontend | Next.js 16 (React 19), Tailwind v4 | Dark, minimal, browser-only |
+| Backend | FastAPI, `asyncpg` | Single-process async |
+| Database | Postgres + `pgvector` (Supabase today, local Postgres capable) | Vector search on 384-dim embeddings |
+| LLM | Ollama (`llama3.2:3b` default), Anthropic Claude fallback | Swappable behind an `LLMProvider` protocol in `agent.py` |
+| Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) | Local, 384-dim, offline |
+| STT | `faster-whisper` (base) | CPU-only |
+| TTS | Piper (`en_US-amy-medium`) | CPU-only |
+| Voice activity | Browser-side (`AudioContext` + `AnalyserNode`) | Pure JS, offline |
+| Multi-device transport | Server-Sent Events | Per-conversation subscriber count for presence |
+| HTTPS access | Tailscale MagicDNS + `tailscale cert` | Same cert for FE and BE |
 
-## Repository Layout
+## Notable Engineering
 
-```text
-frontend/                  Next.js app
-backend/                   FastAPI app
-backend/models/piper/      Piper voice model files (gitignored)
-backend/supabase/migrations/   SQL migrations applied via migrate.py
-```
+### Cross-device state sync
 
-## Backend Setup
+The core question: two devices are open at the same time, both viewing the same conversation. How do they stay in sync without a coordination server?
 
-From `backend/`:
+Each conversation has a Server-Sent Events endpoint at `GET /api/conversations/{id}/stream`. When a browser opens the conversation, it subscribes to that stream. New messages posted from any device fan out to every subscribed listener. Presence is tracked with a module-level `defaultdict[UUID, int]` counting active subscribers per conversation, incremented on connect and decremented in the endpoint's `finally` block when the SSE loop's write fails.
+
+The interesting problem was **distinguishing "user closed the app" from "user just refreshed the tab."** Refresh causes a brief SSE disconnect that shouldn't tear the session down. The solution is a two-part rule:
+- `sessionStorage` persists the `conversationId` across refreshes, so the frontend restores the same conversation immediately.
+- A five-minute grace window on the backend: a conversation stays "active" as long as at least one device has been subscribed within the last five minutes, tracked via a debounced `finalize_after` background task. On real closure, that task runs consolidation over any residual messages and generates a conversation summary.
+- Cross-server-restart recovery: on startup, `recover_pending_finalizations` scans for any conversation whose `summary is null` and schedules `finalize_after` with a delay computed from the elapsed idle time, so five-minute finalization survives backend restarts.
+
+### Streaming chat with mid-flight interrupts
+
+The chat endpoint is a `StreamingResponse` that yields tokens from Ollama as they generate. The frontend reads the response body via `ReadableStream.getReader()` and appends each chunk into a live "Jarvis" bubble as tokens arrive.
+
+The subtler problem: **what happens when the user sends a new message while Jarvis is still generating a reply?** Two invariants had to hold together:
+
+1. The interrupted user message must stay in DB as unanswered, so Jarvis's next reply addresses it.
+2. No partial "phantom" reply should land in DB — otherwise refresh would show a reply the user never saw.
+
+The solution:
+- The frontend tracks `isGenerating` state and holds an `AbortController` for the in-flight fetch. On new Send, if `isGenerating` is true, the fetch is aborted (audio is also stopped, always).
+- The backend's streaming generator wraps the token loop in `try/except/else`. `CancelledError` (thrown when the client disconnects) is re-raised without saving. Only the `else` branch — reached on normal completion — writes the assistant message and fires the consolidation trigger.
+- A helper, `merge_consecutive_user_turns`, collapses multiple unanswered user rows in history into a single composite user message before sending to the LLM. Small models like `llama3.2:3b` handle one composite turn much better than a `[user, user, user]` sequence.
+- The conversation ID is generated client-side into a `useRef` so rapid back-to-back sends all reference the same UUID (React state updates async; the ref updates synchronously). The backend upserts the row if the ID is new.
+
+The result: you can talk over Jarvis. He'll finish addressing you when he catches up.
+
+### Memory pipeline
+
+Every fact Jarvis learns flows through the same `save_or_reconcile` function. Before writing anything, it:
+
+1. Embeds the new fact and runs a similarity search against existing memories with a `min_similarity=0.82` threshold.
+2. Passes the new fact and up-to-five similar existing memories to an LLM reconciler that returns one of four decisions: `ADD` (fact is independent), `REPLACE` (updates an existing fact — e.g. moved cities), `DELETE` (negates an existing fact — "I'm not vegetarian anymore"), or `SKIP` (literally the same fact restated).
+3. Executes on the decision. `ADD` and `SKIP` are automatic. `REPLACE` and `DELETE` are stored as `pending_memory_changes` that surface in the UI for user approval.
+
+A global `asyncio.Lock` around this function prevents duplicate saves when concurrent extractions produce overlapping facts. Batched consolidation debounces triggers, so a rapid burst of messages fires one extraction pass rather than one per message.
+
+The reconciler's prompt was iterated based on real usage — early versions collapsed sibling facts like "likes chocolate" and "likes meat" into one, because they're topically close. The current prompt uses worked examples for `ADD` vs `SKIP` boundaries and explicit anti-examples for meta-statements the extractor kept surfacing ("Oscar wants to discuss X").
+
+### Voice pipeline
+
+Voice is fully local: Whisper for STT, Piper for TTS, and browser-side VAD via `AudioContext.AnalyserNode`. Three pieces made the mobile UX work:
+
+- **iOS Safari autoplay unlock.** iOS blocks `audio.play()` until a user gesture. A persistent `<audio>` element gets its first play call with a tiny silent WAV data URI during the first `mousedown`/`touchstart`, after which it's trusted for all subsequent Piper output in the session.
+- **Voice barge-in.** Tapping the mic pauses Jarvis's TTS immediately. If the recording turns into a Send, the streaming chat endpoint's abort logic takes over.
+- **Tunable VAD.** Silence threshold and duration are exposed as constants in `startRecording`, tuned for a quiet room but easy to bump for noisier environments.
+
+The `TTSProvider` abstraction is in place for a future voice-cloning swap — see Explored Paths for what that experiment revealed.
+
+## API
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/chat` | POST | Send a message. Streams the reply as raw text; the conversation ID is returned in the `X-Conversation-Id` response header. |
+| `/api/conversations/{id}` | GET | Fetch a persisted conversation with all its messages. |
+| `/api/conversations/{id}/stream` | GET | Server-Sent Events subscription for cross-device sync. |
+| `/api/conversations/active` | GET | Return the current "active" conversation across all devices, or `null`. |
+| `/api/greeting` | GET | Return the startup greeting Jarvis generated during LLM warmup. |
+| `/api/memories` | GET/POST | List or add a memory. `POST` runs the new fact through the reconciliation pipeline. |
+| `/api/memories/{id}` | DELETE | Remove a memory. |
+| `/api/memory-changes` | GET | List pending `REPLACE`/`DELETE` changes awaiting approval. |
+| `/api/memory-changes/{id}/approve` | POST | Approve a pending change and apply it. |
+| `/api/memory-changes/{id}/skip` | POST | Discard a pending change. |
+| `/api/speak` | POST | Text → WAV bytes via Piper. |
+| `/api/transcribe` | POST | Multipart audio upload → text via faster-whisper. |
+| `/health` | GET | Backend + database health check. |
+
+## Running It Yourself
+
+### Backend
 
 ```bash
+cd backend
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
-copy .env.example .env
+cp .env.example .env
 ```
 
-Edit `backend/.env`:
-
-```env
-ANTHROPIC_API_KEY=your_anthropic_api_key
-ANTHROPIC_MODEL=claude-sonnet-4-6
-DATABASE_URL=your_supabase_postgres_connection_string
-FRONTEND_ORIGIN=http://localhost:3000
-EMBEDDING_PROVIDER=local
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-PIPER_MODEL_PATH=models/piper/en_US-amy-medium.onnx
-WHISPER_MODEL=base
-```
-
-Download the Piper voice files into `backend/models/piper/`:
+Edit `backend/.env` with your `DATABASE_URL` (Supabase or local Postgres) and `FRONTEND_ORIGIN`. Then download the Piper voice files into `backend/models/piper/`:
 - [en_US-amy-medium.onnx](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx)
 - [en_US-amy-medium.onnx.json](https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json)
 
-Run migrations and start the backend:
+Run migrations and start:
 
 ```bash
 python migrate.py
-.\start.ps1
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Health check:
+Health check: `curl http://localhost:8000/health`.
+
+### Frontend
 
 ```bash
-curl http://localhost:8000/health
-```
-
-## Frontend Setup
-
-From `frontend/`:
-
-```bash
+cd frontend
 npm install
-copy .env.example .env.local
+cp .env.example .env.local
 npm run dev
-```
-
-Edit `frontend/.env.local` if your backend is not running on port `8000`:
-
-```env
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ```
 
 Open `http://localhost:3000`.
 
-## Tailscale / Multi-Machine Setup
+### Ollama (local LLM)
 
-Jarvis runs over HTTPS via a Tailscale MagicDNS hostname (not plain `localhost`) so it works from phone/LAN too — iOS Safari requires a secure context for mic access and `crypto.randomUUID()`. That hostname is hardcoded in **four places**. Moving to a different machine (which gets its own Tailscale hostname) means updating all four:
+Install [Ollama](https://ollama.com) and pull the default model:
 
-| File | What to change |
-|---|---|
-| `frontend/.env.local` | `NEXT_PUBLIC_API_BASE_URL=https://<hostname>:8000` |
-| `frontend/package.json` | `dev` script's `--experimental-https-key` / `--experimental-https-cert` paths |
-| `frontend/next.config.ts` | `allowedDevOrigins` |
-| `backend/start.ps1` | `--ssl-keyfile` / `--ssl-certfile` paths |
-| `backend/.env` | `FRONTEND_ORIGIN` — must match the frontend's actual origin or CORS blocks every request |
-
-Certs live in `backend/certs/<hostname>.{crt,key}` (gitignored) and must be (re)generated per machine:
-
-```powershell
-mkdir certs
-tailscale cert --cert-file certs/<hostname>.crt --key-file certs/<hostname>.key <hostname>
+```bash
+ollama pull llama3.2:3b
 ```
 
-**Constraints:**
-- Tailscale hostnames are unique per tailnet — you can't rename one device to match another while both are online. Only rename if you're retiring the old one.
-- A fresh Tailscale install (e.g. after reinstalling Windows) can mint a *different* hostname even on what feels like "the same machine." Check `tailscale status` or the admin console (login.tailscale.com/admin/machines) rather than assuming it matches a prior session.
+The backend will call it on `http://localhost:11434`.
 
-**Running fully locally, no Tailscale/certs at all:** use plain `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000` (drop the `--ssl-*` flags) and `next dev` (drop `--experimental-https*` in `package.json`), with `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and `FRONTEND_ORIGIN=http://localhost:3000`.
+### Multi-device via Tailscale (optional)
 
-**First-time machine setup gotchas:**
-- PowerShell blocks `.ps1` scripts by default → `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`, or run once via `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
-- Node.js/npm and Ollama are separate installs, not pulled in by `pip install` or `npm install` — install both directly, and open a **new** terminal afterward so PATH updates take effect.
-- Ollama does not auto-pull a model on first API request — `ollama pull <model>` explicitly before starting the backend.
-- `backend/.venv`, `backend/.env`, and `backend/certs/` are all gitignored and machine-specific — recreate them fresh on every new machine (see Backend Setup above).
-
-## API
-
-### `POST /api/chat`
-Send a message, get a reply. Maintains conversation context via `conversation_id`.
-
-```json
-{ "message": "Hello", "conversation_id": null }
-```
-
-### `GET /api/conversations/{id}`
-Fetch a persisted conversation with all its messages.
-
-### `POST /api/memories`
-Save a fact: `{ "content": "I prefer tea over coffee" }`. Stores text + embedding for semantic retrieval.
-
-### `GET /api/memories`
-List all saved memories.
-
-### `DELETE /api/memories/{id}`
-Remove a saved memory.
-
-### `POST /api/transcribe`
-Multipart audio upload → text. Uses faster-whisper.
-
-### `POST /api/speak`
-JSON `{ "text": "..." }` → WAV audio bytes. Uses Piper.
+Jarvis runs over HTTPS via a Tailscale MagicDNS hostname so it's reachable from phone or LAN — iOS Safari requires a secure context for mic access. The setup involves generating certs with `tailscale cert`, wiring them into both the frontend `next dev --experimental-https` flags and uvicorn's `--ssl-*` flags, and updating `FRONTEND_ORIGIN` and `NEXT_PUBLIC_API_BASE_URL` to the MagicDNS hostname. This is documented in more detail in the project's setup notes.
 
 ## Voice Tuning
 
-The frontend mic uses browser-side Voice Activity Detection (VAD) to auto-stop recording after silence and auto-send the transcript to Jarvis. Three knobs live in `frontend/app/page.tsx` inside `startRecording`:
+Three knobs in `frontend/app/page.tsx` inside `startRecording`:
 
-| Parameter | Default | What it does | When to change |
-|---|---|---|---|
-| `silenceThreshold` | `8` | RMS amplitude below this is treated as "silence" (range ~0-127) | Increase to 12-15 if you're in a noisy room and recording never auto-stops. Decrease if it cuts you off mid-word. |
-| `silenceDuration` | `1200` ms | How long silence must persist before the recorder stops | Lower (e.g. 800ms) for snappier responses. Higher (e.g. 2000ms) if you tend to pause mid-thought. |
-| `setInterval(..., 50)` | `50` ms | Polling rate for the VAD loop (20Hz) | Almost never needs changing. Higher = lower CPU; lower = faster reaction. |
-
-The VAD is fully client-side — pure browser APIs (`AudioContext`, `AnalyserNode`), no network or backend involvement, so it works offline.
+| Parameter | Default | What it does |
+|---|---|---|
+| `silenceThreshold` | `8` | RMS amplitude below this is treated as "silence" (0-127 range). |
+| `silenceDuration` | `1200` ms | How long silence must persist before the recorder auto-stops. |
+| `setInterval(..., 50)` | `50` ms | VAD polling rate (20 Hz). |
 
 ## Roadmap
 
-Steps in roughly the order they'll be done:
-
-1. **Strip auth and `user_id` everywhere.** Remove `auth.py` JWT, drop `user_id` columns via migration, remove RLS policies. Backend becomes single-user.
-2. **Swap Claude for Ollama.** Add `OllamaProvider` next to the existing Anthropic call in `agent.py`. Default model: `llama3.1:8b`.
-3. **Write a strong persona system prompt.** Capture voice, values, defaults. Iterate as I use it.
-4. **Bind the backend to `0.0.0.0`** and connect from my phone over LAN. Optionally Tailscale for remote.
-5. **LoRA fine-tuning.** Collect a personal dataset (messages, journal, emails). Train a persona adapter.
-6. **Package as a desktop app** via Tauri. Bundle the LLM, voice models, and Postgres for one-click install.
-7. **Dedicated device.** Raspberry Pi 5 or small NUC running everything 24/7.
-
-## Known Gaps / Future Work
-
-- **Conversation history cache** — the backend currently fetches the full conversation history from Supabase on every chat request. A future improvement is to keep each session's history in memory (e.g. Redis or an in-process cache keyed by `conversation_id`) so the DB is only hit on the first request of a session, not every turn.
-- **Voyage AI embedding provider** — embeddings currently run locally via `sentence-transformers`. The `EmbeddingProvider` abstraction in `app/embeddings.py` is designed to be swappable; adding a `VoyageProvider` behind the same interface would let `EMBEDDING_PROVIDER=voyage` in `.env` switch to Voyage's hosted API for better embedding quality.
-- **Smarter memory retrieval** — the chat endpoint currently injects ALL stored memories into every system prompt. This is fine while the memory set is small (~50-200 facts), but eats context window once it grows past several hundred. Strategies for later, roughly ordered by complexity:
-  1. **Lower the threshold + larger top-k** — switch back to `search_memories` but with `min_similarity = 0` and `top_k = 20`. Cheapest first attempt. Still misses meta-queries.
-  2. **Meta-query detection** — classify questions like "what do you know about me", "tell me about myself", "summarize what you remember" with keyword patterns or a small classifier; for those, fall back to "inject all". Otherwise use semantic search.
-  3. **Always-included core set** — add an `is_core` boolean column to `memories`. Manually mark important facts (name, allergies, key preferences) as core; always inject those plus top-k semantic search for the rest.
-  4. **Recency hybrid** — always include the N newest memories plus top-k semantic matches. Cheap, biases toward current life context.
-  5. **LLM-decided retrieval** — give Jarvis a `get_all_memories(filter?)` tool it can call when it judges the query needs it. Most flexible, most complex; requires function-calling-capable model.
-- **Voice-reactive Jarvis orb** — the background orb currently pulses on a fixed timer. When Jarvis speaks, the orb's pulse should sync to the rhythm/amplitude of the voice output. Likely implementation: tap the Web Audio API's `AnalyserNode` on the TTS audio stream, sample frequency/amplitude in real time, and drive the orb's `transform: scale()` and `opacity` via CSS custom properties.
-- **Local Postgres + pgvector** — for full offline operation, replace Supabase with a local Postgres instance (or SQLite + `sqlite-vec` for simpler distribution). The `DATABASE_URL` abstraction makes this a config-level change.
-- **Built-in calendar and reminders** — rather than integrating with phone-native Calendar/Reminders (Google Calendar API, iCloud CalDAV, etc.), build this functionality directly into Jarvis: own tables (events, reminders with due dates/recurrence), own CRUD endpoints, and Jarvis able to create/query/update them conversationally. Keeps everything local-first and inside Jarvis's own data model instead of depending on a third-party account/API. Tradeoff (discussed and accepted): loses native OS integration (widgets, notifications, cross-device sync) that Google/Apple's apps already provide for free — deliberately choosing full control over that convenience.
-- **Persona prompt iteration** — the `SYSTEM_PROMPT` in `agent.py` is v1 and needs a tuning pass based on real-usage annoyances (bad openers, unwanted disclaimers, tone).
+- **LoRA fine-tuning** on samples of my own writing, converted to GGUF and loaded via Ollama's `Modelfile`.
+- **Built-in calendar and reminders** — own tables and CRUD, so Jarvis can create/query/update events conversationally without an external API.
+- **Local Postgres + pgvector** for full-offline operation. The `DATABASE_URL` abstraction makes this a config-level swap.
+- **Smarter memory retrieval** as the memory set grows — semantic top-k, always-included core facts, or LLM-decided retrieval via tool calls.
+- **Voice-reactive Jarvis orb** — sync the background pulse to the TTS output stream via `AnalyserNode`.
+- **Tauri desktop app** bundling LLM, voice models, and Postgres for one-click install.
+- **Dedicated device** — Raspberry Pi 5 or NUC running everything 24/7.
 
 ## Explored Paths
 
-- **Voice cloning (XTTS-v2 or F5-TTS)** — attempted on the `voice-cloning-xtts` branch, abandoned mid-experiment due to a dependency chain that doesn't work cleanly on our stack (Python 3.13 + PyTorch 2.12 + Windows). Chain of issues encountered, in order: `torchaudio` missing → `transformers.pytorch_utils.isin_mps_friendly` removed → `torchcodec` missing → FFmpeg missing → PyTorch/torchcodec version incompatibility. The `TTSProvider` abstraction in `app/voice.py` is ready to accept an `XTTSProvider` — the code shape is documented on the branch. Revisit options when picking this up again: (1) rebuild the venv with Python 3.11 and pinned older PyTorch (2.4-ish) to match torchcodec's compatibility matrix, (2) try [F5-TTS](https://github.com/SWivid/F5-TTS) instead — lighter dependency footprint, MIT license, similar zero-shot cloning, (3) wait for the `coqui-tts` Idiap fork to publish releases against newer torch.
+**Voice cloning (XTTS-v2 or F5-TTS)** — attempted on the `voice-cloning-xtts` branch, abandoned mid-experiment due to a dependency chain that doesn't compose cleanly on Python 3.13 + PyTorch 2.12 + Windows: `torchaudio` missing → `transformers.pytorch_utils.isin_mps_friendly` removed → `torchcodec` missing → FFmpeg missing → PyTorch/torchcodec version incompatibility. The `TTSProvider` abstraction in `app/voice.py` is shaped to accept an `XTTSProvider` implementation; the branch documents the code shape. Revisit paths when picking this up again: rebuild the venv with Python 3.11 and pinned older PyTorch (~2.4) to match torchcodec's compatibility matrix, try [F5-TTS](https://github.com/SWivid/F5-TTS) which has a lighter dependency footprint, or wait for the `coqui-tts` Idiap fork to publish releases against newer torch.
