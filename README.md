@@ -2,9 +2,11 @@
 
 > A local-first, voice-driven personal AI assistant that remembers you across devices.
 
-I built Jarvis because commercial assistants have three shortcomings I couldn't work around: they don't remember what you told them last week, they live in someone else's cloud, and they can't be reshaped to match your voice or judgment. Jarvis is my attempt to fix all three. It runs from a single machine on my Tailscale tailnet, is reachable from any device I own, and keeps a persistent semantic memory of facts I've shared.
+I built Jarvis to gain hands-on experience with React and to see how LLMs fit into a modern web architecture end to end. Along the way it also became the personal assistant I actually wanted — one I could shape to my own preferences on voice, memory, and response style rather than living inside a commercial product's defaults. Everything runs on open-source models (Ollama for chat, `sentence-transformers` for embeddings, Piper for TTS, Whisper for STT), so it stays local and private.
 
-The project has become a testbed for a set of engineering problems I find interesting: cross-device state consistency without a coordination server, streaming LLM responses with mid-flight cancellation, and turning conversational chat into a durable knowledge base that the assistant can reason over.
+Persistent memory is table stakes for modern assistants at this point — every major product has it. This version replicates the pattern (extract, embed, reconcile against similar facts) so I could understand the tradeoffs at each step and tune them to what I actually want. The engineering that emerged along the way — cross-device sync without a coordination server, and streaming LLM replies with mid-flight cancellation — is what this README focuses on.
+
+Jarvis is a work in progress; the roadmap at the bottom lays out what's still ahead.
 
 ## Highlights
 
