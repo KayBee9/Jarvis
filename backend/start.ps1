@@ -12,5 +12,5 @@ if (-not $env:VIRTUAL_ENV) {
 }
 
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 `
-    --ssl-keyfile certs/desktop-k5pi7kg.tail5ce535.ts.net.key `
-    --ssl-certfile certs/desktop-k5pi7kg.tail5ce535.ts.net.crt
+    --ssl-keyfile certs/jarvis.key `
+    --ssl-certfile certs/jarvis.crt

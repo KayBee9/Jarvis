@@ -186,7 +186,16 @@ The backend will call it on `http://localhost:11434`.
 
 ### Multi-device via Tailscale (optional)
 
-Jarvis runs over HTTPS via a Tailscale MagicDNS hostname so it's reachable from phone or LAN — iOS Safari requires a secure context for mic access. The setup involves generating certs with `tailscale cert`, wiring them into both the frontend `next dev --experimental-https` flags and uvicorn's `--ssl-*` flags, and updating `FRONTEND_ORIGIN` and `NEXT_PUBLIC_API_BASE_URL` to the MagicDNS hostname. This is documented in more detail in the project's setup notes.
+Jarvis runs over HTTPS via a Tailscale MagicDNS hostname so it's reachable from phone or LAN — iOS Safari requires a secure context for mic access. From `backend/`, generate the certificate:
+
+```powershell
+mkdir certs
+tailscale cert --cert-file certs/jarvis.crt --key-file certs/jarvis.key <your-hostname>
+```
+
+`start.ps1` and `npm run dev` both load those two files. Then point the config at your hostname: `FRONTEND_ORIGIN` in `backend/.env`, `NEXT_PUBLIC_API_BASE_URL` in `frontend/.env.local`, and `allowedDevOrigins` in `frontend/next.config.ts`. The last two files are machine-specific and not committed, so create them locally.
+
+To run without Tailscale, start the frontend with `npx next dev`, because `npm run dev` requires the certificates.
 
 ## Voice Tuning
 

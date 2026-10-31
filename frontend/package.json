@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --experimental-https --experimental-https-key ../backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.key --experimental-https-cert ../backend/certs/desktop-k5pi7kg.tail5ce535.ts.net.crt",
+    "dev": "next dev --experimental-https --experimental-https-key ../backend/certs/jarvis.key --experimental-https-cert ../backend/certs/jarvis.crt",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
