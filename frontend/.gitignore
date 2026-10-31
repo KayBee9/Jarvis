@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# machine-specific dev config (contains the Tailscale hostname)
+/next.config.ts
+
 # vercel
 .vercel
 
