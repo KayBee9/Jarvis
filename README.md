@@ -197,6 +197,35 @@ tailscale cert --cert-file certs/jarvis.crt --key-file certs/jarvis.key <your-ho
 
 To run without Tailscale, start the frontend with `npx next dev`, because `npm run dev` requires the certificates.
 
+## Running the Tests
+
+The tests live in `tests/` at the repo root. Run them from the repo root with the backend's virtual environment active:
+
+```powershell
+backend\.venv\Scripts\Activate.ps1
+pytest
+```
+
+This runs in about a second and doesn't need Ollama or a database. The LLM and database are replaced with fakes, and `tests/conftest.py` blanks `DATABASE_URL` so the tests can't reach real data. SQL queries and the frontend aren't covered yet.
+
+In the results, `xfailed` means a test that documents a known bug that hasn't been fixed yet. Add `-rx` to list them with their reasons.
+
+To run a single file:
+
+```bash
+pytest tests/test_merge_turns.py
+```
+
+### Prompt checks
+
+The tests in `tests/evals/` send real prompts to the local LLM to check its memory decisions, so they're left out of the normal run. Start Ollama, then run:
+
+```bash
+pytest -m eval
+```
+
+These take about 30 seconds. LLM output varies, so treat the result as a score rather than a pass/fail gate: a different case may fail from one run to the next.
+
 ## Voice Tuning
 
 Three knobs in `frontend/app/page.tsx` inside `startRecording`:

@@ -10,3 +10,4 @@ piper-tts
 faster-whisper
 python-multipart
 ollama
+pytest
